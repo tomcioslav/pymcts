@@ -167,6 +167,19 @@ class GameState:
             showlegend=False, hoverinfo="skip",
         ))
 
+        # Draw ghost bridges (potential moves) as very faint lines
+        for r in range(1, g - 1):
+            for c in range(1, g - 1):
+                if (r + c) % 2 != 0 or self.board[r, c] != 0:
+                    continue
+                for player, color in [(Player.VERTICAL, "green"), (Player.HORIZONTAL, "red")]:
+                    eps = self.endpoints(r, c, player)
+                    (r0, c0), (r1, c1) = eps
+                    fig.add_shape(type="line",
+                        x0=c0, x1=c1, y0=r0, y1=r1,
+                        line=dict(color=color, width=2),
+                        opacity=0.2)
+
         # Draw bridges and their endpoints
         for r in range(1, g - 1):
             for c in range(1, g - 1):
