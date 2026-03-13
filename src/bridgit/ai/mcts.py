@@ -8,7 +8,7 @@ import torch
 from bridgit.ai.neural_net import NetWrapper
 from bridgit.game import Bridgit
 from bridgit.schema import Move
-from bridgit.config import BoardConfig, MCTSConfig
+from bridgit.config import MCTSConfig
 
 
 class MCTSNode:
@@ -60,10 +60,9 @@ class MCTSNode:
 class MCTS:
     """Monte Carlo Tree Search guided by a neural network."""
 
-    def __init__(self, net_wrapper: NetWrapper, mcts: MCTSConfig, board: BoardConfig):
+    def __init__(self, net_wrapper: NetWrapper, mcts_config: MCTSConfig):
         self.net_wrapper = net_wrapper
-        self.mcts_config = mcts
-        self.board_config = board
+        self.mcts_config = mcts_config
 
     def _predict(self, game: Bridgit) -> tuple[torch.Tensor, float]:
         """Run neural net on game state.
@@ -120,7 +119,7 @@ class MCTS:
             return 1.0  # current_player is the winner
 
         policy, value = self._predict(node.game)
-        valid_mask = node.game.to_mask()  # (g, g) torch.Tensor
+        valid_mask = node.game.to_mask()  # (g, g) canonical space
 
         # Mask and renormalize policy
         policy = policy * valid_mask
@@ -135,14 +134,16 @@ class MCTS:
                 node.is_expanded = True
                 return value
 
-        # Create children for valid moves
+        # Create children — coordinates are canonical, decanonicalize for actual moves
+        player = node.game.current_player
         for r, c in torch.nonzero(valid_mask, as_tuple=False):
             r, c = r.item(), c.item()
-            move = Move(row=r, col=c)
+            canonical_move = Move(row=r, col=c)
+            actual_move = canonical_move.decanonicalize(player)
             child_game = node.game.copy()
-            child_game.make_move(move)
-            child = MCTSNode(child_game, parent=node, action=move, prior=policy[r, c].item())
-            node.children[move] = child
+            child_game.make_move(actual_move)
+            child = MCTSNode(child_game, parent=node, action=canonical_move, prior=policy[r, c].item())
+            node.children[canonical_move] = child
 
         node.is_expanded = True
         return value
@@ -173,23 +174,21 @@ class MCTS:
                 (1 - eps) * node.children[move].prior + eps * noise[i]
             )
 
-    def get_action_probs(self, game: Bridgit, temperature: float = 1.0) -> np.ndarray:
-        """Run MCTS and return action probabilities.
+    @staticmethod
+    def visit_counts_to_probs(
+        visit_counts: torch.Tensor, temperature: float = 1.0
+    ) -> torch.Tensor:
+        """Convert visit counts to a probability distribution.
 
         Args:
-            game: current game state
+            visit_counts: tensor of visit counts
             temperature: 1.0 = proportional to visits, 0.0 = greedy
-
-        Returns:
-            probs: np.ndarray of shape (g, g) summing to 1
         """
-        root = self._search(game)
-        visit_counts = root.visit_counts()
-
         if temperature == 0:
             best = torch.argmax(visit_counts)
+            best_idx = np.unravel_index(best.item(), visit_counts.shape)
             probs = torch.zeros_like(visit_counts)
-            probs[best] = torch.tensor(1.0)
+            probs[best_idx] = torch.tensor(1.0)
             return probs
 
         counts = visit_counts ** (1.0 / temperature)
@@ -197,3 +196,8 @@ class MCTS:
         if total == 0:
             return visit_counts
         return counts / total.item()
+
+    def get_action_probs(self, game: Bridgit, temperature: float = 1.0) -> torch.Tensor:
+        """Run MCTS and return action probabilities."""
+        root = self._search(game)
+        return self.visit_counts_to_probs(root.visit_counts(), temperature)

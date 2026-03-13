@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "pygame>=2.5.0",
     "pytest>=9.0.2",
+    "tqdm>=4.60.0",
 ]
 
 [project.optional-dependencies]

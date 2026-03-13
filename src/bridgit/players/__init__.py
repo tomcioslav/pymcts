@@ -5,7 +5,6 @@ from bridgit.players.players import (
     RandomPlayer,
     MCTSPlayer,
     GreedyMCTSPlayer,
-    HumanPlayer,
 )
 from bridgit.players.arena import Arena
 
@@ -13,7 +12,6 @@ __all__ = [
     "Arena",
     "BasePlayer",
     "GreedyMCTSPlayer",
-    "HumanPlayer",
     "MCTSPlayer",
     "RandomPlayer",
 ]

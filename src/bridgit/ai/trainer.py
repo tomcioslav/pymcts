@@ -1,29 +1,45 @@
 """Main training pipeline: self-play → train → evaluate loop."""
 
 import argparse
-import os
 from collections import deque
 
-import numpy as np
+import torch
 
-from bridgit.ai.mcts import MCTS
 from bridgit.ai.neural_net import BridgitNet, NetWrapper
-from bridgit.ai.self_play import generate_self_play_data, Example
 from bridgit.players.arena import Arena
-from bridgit.schema import Move
+from bridgit.players.players import MCTSPlayer, GreedyMCTSPlayer
+from bridgit.schema import GameRecord
 from bridgit.config import Config
 
 
-def make_mcts_player(net_wrapper: NetWrapper, config: Config):
-    """Create a player function that uses MCTS for move selection."""
-    mcts = MCTS(net_wrapper, config.mcts, config.board)
+# Training example: (state_tensor, target_policy, target_value)
+Example = tuple[torch.Tensor, torch.Tensor, float]
 
-    def player_fn(game):
-        pi = mcts.get_action_probs(game, temperature=0)
-        best = np.unravel_index(np.argmax(pi), pi.shape)
-        return Move(row=int(best[0]), col=int(best[1]))
 
-    return player_fn
+def examples_from_records(records: list[GameRecord]) -> list[Example]:
+    """Extract training examples from game records.
+
+    Only includes moves that have an MCTS policy attached.
+    """
+    from bridgit.game import Bridgit
+    from bridgit.config import BoardConfig
+    from bridgit.schema.player import Player
+
+    examples: list[Example] = []
+    for record in records:
+        board_config = BoardConfig(size=record.board_size)
+        game = Bridgit(board_config)
+
+        for move_rec in record.moves:
+            if move_rec.policy is not None:
+                state_tensor = game.to_tensor()
+                player_value = game.current_player.value
+                winner_value = record.winner.value
+                value = 1.0 if player_value == winner_value else -1.0
+                examples.append((state_tensor, move_rec.policy, value))
+            game.make_move(move_rec.move)
+
+    return examples
 
 
 def train(config: Config):
@@ -50,18 +66,22 @@ def train(config: Config):
 
         # 1. Self-play
         print("\n[1/3] Self-play...")
-        new_examples = generate_self_play_data(
-            net_wrapper, config.board, config.mcts, config.training
+        self_play_player = MCTSPlayer(
+            net_wrapper, config.mcts,
+            temperature=1.0, name="self-play",
         )
+        arena = Arena(self_play_player, self_play_player, config.board)
+        records = arena.play_games(config.training.num_self_play_games)
+
+        new_examples = examples_from_records(records)
         replay_buffer.append(new_examples)
 
-        # Flatten all examples from replay buffer
         all_examples = [ex for batch in replay_buffer for ex in batch]
+        print(f"  Self-play: {len(records)} games, {len(new_examples)} examples")
         print(f"  Replay buffer: {len(replay_buffer)} iterations, {len(all_examples)} examples")
 
         # 2. Train
         print("\n[2/3] Training...")
-        # Save current model before training (for comparison)
         temp_checkpoint = config.paths.checkpoints / "temp.pt"
         net_wrapper.save_checkpoint(str(temp_checkpoint))
 
@@ -69,9 +89,8 @@ def train(config: Config):
 
         # 3. Evaluate
         print("\n[3/3] Arena evaluation...")
-        new_player = make_mcts_player(net_wrapper, config)
+        new_player = GreedyMCTSPlayer(net_wrapper, config.mcts, name="new")
 
-        # Load previous best for comparison
         prev_model = BridgitNet(config.board, config.neural_net)
         prev_net = NetWrapper(prev_model)
         if best_checkpoint.exists():
@@ -79,10 +98,13 @@ def train(config: Config):
         else:
             prev_net.load_checkpoint(str(temp_checkpoint))
 
-        prev_player = make_mcts_player(prev_net, config)
+        prev_player = GreedyMCTSPlayer(prev_net, config.mcts, name="prev")
 
-        arena = Arena(new_player, prev_player, config.board)
-        new_wins, prev_wins = arena.play_games(config.arena.num_games)
+        eval_arena = Arena(new_player, prev_player, config.board)
+        eval_records = eval_arena.play_games(config.arena.num_games)
+        scores = Arena.score(eval_records)
+        new_wins = scores.get("new", 0)
+        prev_wins = scores.get("prev", 0)
         total = new_wins + prev_wins
         win_rate = new_wins / total if total > 0 else 0
 
@@ -96,11 +118,9 @@ def train(config: Config):
             print("  -> REJECTED: keeping previous model")
             net_wrapper.load_checkpoint(str(temp_checkpoint))
 
-        # Clean up temp checkpoint
         if temp_checkpoint.exists():
             temp_checkpoint.unlink()
 
-        # Save iteration checkpoint
         iter_checkpoint = config.paths.checkpoints / f"iter_{iteration:04d}.pt"
         net_wrapper.save_checkpoint(str(iter_checkpoint))
         print(f"  Saved iteration checkpoint: {iter_checkpoint}")

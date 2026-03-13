@@ -31,7 +31,6 @@ class MCTSConfig(BaseModel):
     c_puct: float = 1.5
     dirichlet_alpha: float = 1.0
     dirichlet_epsilon: float = 0.25
-    temp_threshold: int = 8  # moves before switching to greedy
 
 
 class NeuralNetConfig(BaseModel):
