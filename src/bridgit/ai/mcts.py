@@ -48,9 +48,10 @@ class MCTSNode:
         """Return the most-visited child's move."""
         return max(self.children, key=lambda m: self.children[m].visit_count)
 
-    def visit_counts(self, grid_size: int) -> np.ndarray:
+    def visit_counts(self) -> torch.Tensor:
         """Return visit counts as a (g, g) array."""
-        visits = np.zeros((grid_size, grid_size), dtype=np.float32)
+        g = self.game.board_config.grid_size
+        visits = torch.zeros((g, g), dtype=torch.float32)
         for move, child in self.children.items():
             visits[move.row, move.col] = child.visit_count
         return visits
@@ -64,11 +65,11 @@ class MCTS:
         self.mcts_config = mcts
         self.board_config = board
 
-    def _predict(self, game: Bridgit) -> tuple[np.ndarray, float]:
+    def _predict(self, game: Bridgit) -> tuple[torch.Tensor, float]:
         """Run neural net on game state.
 
         Returns:
-            policy: np.ndarray of shape (g, g) — probabilities
+            policy: torch.Tensor of shape (g, g) — probabilities (cpu)
             value: float — position evaluation for current player
         """
         model = self.net_wrapper.model
@@ -81,7 +82,7 @@ class MCTS:
             log_policy, value = model(tensor)
 
         # log_policy: (1, g, g) → (g, g)
-        policy = torch.exp(log_policy[0]).cpu().numpy()
+        policy = torch.exp(log_policy[0]).cpu()
         val = value[0].item()
 
         return policy, val
@@ -119,7 +120,7 @@ class MCTS:
             return 1.0  # current_player is the winner
 
         policy, value = self._predict(node.game)
-        valid_mask = node.game.to_mask().numpy()  # (g, g)
+        valid_mask = node.game.to_mask()  # (g, g) torch.Tensor
 
         # Mask and renormalize policy
         policy = policy * valid_mask
@@ -135,12 +136,12 @@ class MCTS:
                 return value
 
         # Create children for valid moves
-        for r, c in zip(*np.nonzero(valid_mask)):
-            r, c = int(r), int(c)
+        for r, c in torch.nonzero(valid_mask, as_tuple=False):
+            r, c = r.item(), c.item()
             move = Move(row=r, col=c)
             child_game = node.game.copy()
             child_game.make_move(move)
-            child = MCTSNode(child_game, parent=node, action=move, prior=policy[r, c])
+            child = MCTSNode(child_game, parent=node, action=move, prior=policy[r, c].item())
             node.children[move] = child
 
         node.is_expanded = True
@@ -183,16 +184,16 @@ class MCTS:
             probs: np.ndarray of shape (g, g) summing to 1
         """
         root = self._search(game)
-        visit_counts = root.visit_counts(self.board_config.grid_size)
+        visit_counts = root.visit_counts()
 
         if temperature == 0:
-            best = np.unravel_index(np.argmax(visit_counts), visit_counts.shape)
-            probs = np.zeros_like(visit_counts)
-            probs[best] = 1.0
+            best = torch.argmax(visit_counts)
+            probs = torch.zeros_like(visit_counts)
+            probs[best] = torch.tensor(1.0)
             return probs
 
         counts = visit_counts ** (1.0 / temperature)
         total = counts.sum()
         if total == 0:
             return visit_counts
-        return counts / total
+        return counts / total.item()
