@@ -112,8 +112,14 @@ class Bridgit:
         return 1.0 if self.winner == player else -1.0
 
     def to_tensor(self) -> "torch.Tensor":
-        """Canonical state tensor for the current player. Shape (3, g, g)."""
-        return self.state.canonical(self.current_player).to_tensor()
+        """Canonical state tensor for the current player. Shape (4, g, g).
+
+        Channels: mine, theirs, playable, moves_left_in_turn (1 or 2).
+        """
+        base = self.state.canonical(self.current_player).to_tensor()  # (3, g, g)
+        g = base.shape[1]
+        moves_plane = torch.full((1, g, g), self.moves_left_in_turn, dtype=torch.float32)
+        return torch.cat([base, moves_plane], dim=0)
 
     def to_mask(self) -> "torch.Tensor":
         """Valid-moves mask from the current player's perspective. Shape (g, g)."""

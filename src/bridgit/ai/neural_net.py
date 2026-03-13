@@ -1,9 +1,10 @@
 """ResNet-based neural network for Bridgit (policy + value heads).
 
-Input:  GameState.to_tensor(player) → shape (3, g, g) where g = 2n-1
+Input:  Bridgit.to_tensor() → shape (4, g, g) where g = 2n+1
   - Channel 0: current player's edges
   - Channel 1: opponent's edges
   - Channel 2: playability mask (1 at edge positions)
+  - Channel 3: moves left in turn (1 or 2, constant plane)
 Output: (log_policy, value)
   - log_policy: shape (g, g) — log probabilities over board positions
   - value: shape (1,) — position evaluation in [-1, 1]
@@ -48,8 +49,8 @@ class BridgitNet(nn.Module):
         g = board.grid_size
         ch = net.num_channels
 
-        # Initial convolution: 3 input channels (mine, theirs, playable)
-        self.conv_init = nn.Conv2d(3, ch, 3, padding=1, bias=False)
+        # Initial convolution: 4 input channels (mine, theirs, playable, moves_left)
+        self.conv_init = nn.Conv2d(4, ch, 3, padding=1, bias=False)
         self.bn_init = nn.BatchNorm2d(ch)
 
         # Residual tower
