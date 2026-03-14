@@ -10,6 +10,10 @@ Output: (log_policy, value)
   - value: shape (1,) — position evaluation in [-1, 1]
 """
 
+from __future__ import annotations
+
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -46,6 +50,7 @@ class BridgitNet(nn.Module):
     def __init__(self, board: BoardConfig = BoardConfig(), net: NeuralNetConfig = NeuralNetConfig()):
         super().__init__()
         self.board_config = board
+        self.net_config = net
         g = board.grid_size
         ch = net.num_channels
 
@@ -84,9 +89,12 @@ class BridgitNet(nn.Module):
 
 
 class NetWrapper:
-    """Thin wrapper around BridgitNet: device handling and inference."""
+    """Thin wrapper around BridgitNet: device handling, checkpoints, and inference."""
 
-    def __init__(self, model: BridgitNet):
+    def __init__(
+        self,
+        model_or_path: BridgitNet | str | Path | None = None,
+    ):
         if torch.backends.mps.is_available():
             self.device = torch.device("mps")
         elif torch.cuda.is_available():
@@ -94,12 +102,40 @@ class NetWrapper:
         else:
             self.device = torch.device("cpu")
 
+        if isinstance(model_or_path, BridgitNet):
+            model = model_or_path
+        elif model_or_path is not None:
+            checkpoint = torch.load(Path(model_or_path), map_location="cpu", weights_only=False)
+            board_config = BoardConfig(**checkpoint["board_config"])
+            net_config = NeuralNetConfig(**checkpoint["net_config"])
+            model = BridgitNet(board_config, net_config)
+            model.load_state_dict(checkpoint["model_state_dict"])
+        else:
+            model = BridgitNet()
+
         self.model = model.to(self.device)
+
+    def save_checkpoint(self, path: str | Path) -> None:
+        """Save model and config to a checkpoint file."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint = {
+            "model_state_dict": self.model.state_dict(),
+            "board_config": self.model.board_config.model_dump(),
+            "net_config": self.model.net_config.model_dump(),
+        }
+        torch.save(checkpoint, path)
+
+    def load_checkpoint(self, path: str | Path) -> None:
+        """Load model weights from a checkpoint file."""
+        path = Path(path)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
 
     def make_move(self, game: Bridgit) -> Move:
         """Pick the best legal move."""
         self.model.eval()
-        tensor = game.to_tensor().unsqueeze(0).to(self.device)  # (1, 3, g, g)
+        tensor = game.to_tensor().unsqueeze(0).to(self.device)  # (1, 4, g, g)
         mask = game.to_mask()  # (g, g)
 
         with torch.no_grad():

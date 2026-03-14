@@ -12,6 +12,7 @@ class PathsConfig(BaseModel):
     """File system paths for the project."""
     root: Path = _PROJECT_ROOT
     checkpoints: Path = _PROJECT_ROOT / "checkpoints"
+    models: Path = _PROJECT_ROOT / "models"
     data: Path = _PROJECT_ROOT / "data"
 
 
