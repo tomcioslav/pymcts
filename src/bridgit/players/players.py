@@ -1,6 +1,7 @@
 """Player abstractions for different playing strategies."""
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -28,6 +29,11 @@ class BasePlayer(ABC):
         """MCTS policy from the last get_action call, if available."""
         return None
 
+    @abstractmethod
+    def to_spec(self) -> dict:
+        """Serialize player config for multiprocess reconstruction."""
+        pass
+
     def __repr__(self) -> str:
         return self.name
 
@@ -37,6 +43,9 @@ class RandomPlayer(BasePlayer):
 
     def __init__(self, name: str | None = None):
         super().__init__(name)
+
+    def to_spec(self) -> dict:
+        return {"type": "random", "name": self.name}
 
     def get_action(self, game: Bridgit) -> Move:
         """Select a random legal move."""
@@ -68,6 +77,21 @@ class MCTSPlayer(BasePlayer):
     def last_policy(self) -> torch.Tensor | None:
         return self._last_policy
 
+    def to_spec(self) -> dict:
+        return {
+            "type": "mcts",
+            "name": self.name,
+            "temperature": self.temperature,
+            "temp_threshold": self.temp_threshold,
+            "mcts_config": self.mcts_search.mcts_config.model_dump(),
+            "model_state_dict": {
+                k: v.cpu()
+                for k, v in self.mcts_search.net_wrapper.model.state_dict().items()
+            },
+            "board_config": self.mcts_search.net_wrapper.model.board_config.model_dump(),
+            "net_config": self.mcts_search.net_wrapper.model.net_config.model_dump(),
+        }
+
     def get_action(self, game: Bridgit) -> Move:
         """Select move using MCTS."""
         temp = self.temperature if game.move_count < self.temp_threshold else 0.0
@@ -81,6 +105,21 @@ class MCTSPlayer(BasePlayer):
         row, col = divmod(flat_idx, probs.shape[1])
         canonical_move = Move(row=row, col=col)
         return canonical_move.decanonicalize(game.current_player)
+
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint_path: str | Path,
+        mcts_config: MCTSConfig = MCTSConfig(),
+        temperature: float = 1.0,
+        temp_threshold: int = 0,
+        name: str | None = None,
+    ) -> "MCTSPlayer":
+        """Create an MCTSPlayer from a saved checkpoint."""
+        net_wrapper = NetWrapper(checkpoint_path)
+        return cls(net_wrapper, mcts_config, temperature=temperature,
+                   temp_threshold=temp_threshold, name=name)
 
 
 class GreedyMCTSPlayer(MCTSPlayer):

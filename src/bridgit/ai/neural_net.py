@@ -47,19 +47,23 @@ class BridgitNet(nn.Module):
       - value: (batch, 1) tanh-scaled position evaluation
     """
 
-    def __init__(self, board: BoardConfig = BoardConfig(), net: NeuralNetConfig = NeuralNetConfig()):
+    def __init__(
+        self,
+        board_config: BoardConfig = BoardConfig(),
+        net_config: NeuralNetConfig = NeuralNetConfig(),
+    ):
         super().__init__()
-        self.board_config = board
-        self.net_config = net
-        g = board.grid_size
-        ch = net.num_channels
+        self.board_config = board_config
+        self.net_config = net_config
+        g = board_config.grid_size
+        ch = net_config.num_channels
 
         # Initial convolution: 4 input channels (mine, theirs, playable, moves_left)
         self.conv_init = nn.Conv2d(4, ch, 3, padding=1, bias=False)
         self.bn_init = nn.BatchNorm2d(ch)
 
         # Residual tower
-        self.res_blocks = nn.Sequential(*[ResBlock(ch) for _ in range(net.num_res_blocks)])
+        self.res_blocks = nn.Sequential(*[ResBlock(ch) for _ in range(net_config.num_res_blocks)])
 
         # Policy head: conv down to 1 channel → (batch, g, g)
         self.policy_conv = nn.Conv2d(ch, 1, 1)
@@ -127,9 +131,30 @@ class NetWrapper:
         torch.save(checkpoint, path)
 
     def load_checkpoint(self, path: str | Path) -> None:
-        """Load model weights from a checkpoint file."""
+        """Load model weights from a checkpoint file.
+
+        Raises ValueError if the checkpoint's board or net config
+        doesn't match this model's architecture.
+        """
         path = Path(path)
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+
+        ckpt_board = checkpoint["board_config"]
+        ckpt_net = checkpoint["net_config"]
+        cur_board = self.model.board_config.model_dump()
+        cur_net = self.model.net_config.model_dump()
+
+        if ckpt_board != cur_board:
+            raise ValueError(
+                f"Board config mismatch: checkpoint has {ckpt_board}, "
+                f"model expects {cur_board}"
+            )
+        if ckpt_net != cur_net:
+            raise ValueError(
+                f"Neural net config mismatch: checkpoint has {ckpt_net}, "
+                f"model expects {cur_net}"
+            )
+
         self.model.load_state_dict(checkpoint["model_state_dict"])
 
     def make_move(self, game: Bridgit) -> Move:

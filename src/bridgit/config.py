@@ -14,6 +14,7 @@ class PathsConfig(BaseModel):
     checkpoints: Path = _PROJECT_ROOT / "checkpoints"
     models: Path = _PROJECT_ROOT / "models"
     data: Path = _PROJECT_ROOT / "data"
+    trainings: Path = _PROJECT_ROOT / "trainings"
 
 
 class BoardConfig(BaseModel):
@@ -32,6 +33,7 @@ class MCTSConfig(BaseModel):
     c_puct: float = 1.5
     dirichlet_alpha: float = 1.0
     dirichlet_epsilon: float = 0.25
+    solve_terminal: bool = True  # treat opponent's winning replies as guaranteed losses
 
 
 class NeuralNetConfig(BaseModel):
@@ -55,6 +57,7 @@ class ArenaConfig(BaseModel):
     """Arena evaluation settings."""
     num_games: int = 40
     threshold: float = 0.55
+    swap_players: bool = True
 
 
 class Config(BaseModel):

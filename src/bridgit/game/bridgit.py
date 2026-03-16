@@ -13,10 +13,10 @@ from bridgit.config import BoardConfig
 class Bridgit:
     """Bridgit game — manages turns, win detection, and game flow."""
 
-    def __init__(self, board: BoardConfig = BoardConfig()):
-        self.state = GameState.empty(board.size)
-        self.n = board.size
-        self.board_config = board
+    def __init__(self, board_config: BoardConfig = BoardConfig()):
+        self.state = GameState.empty(board_config.size)
+        self.n = board_config.size
+        self.board_config = board_config
         self.current_player = Player.HORIZONTAL
         self.winner: Player | None = None
         self.game_over = False
