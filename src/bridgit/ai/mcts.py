@@ -16,10 +16,12 @@ class MCTSNode:
     """A node in the MCTS tree."""
 
     __slots__ = ["game", "parent", "action", "children", "visit_count",
-                 "value_sum", "prior", "is_expanded", "solved_value"]
+                 "value_sum", "prior", "is_expanded", "solved_value",
+                 "child_index", "path"]
 
     def __init__(self, game: Bridgit, parent: "MCTSNode | None" = None,
-                 action: Move | None = None, prior: float = 0.0):
+                 action: Move | None = None, prior: float = 0.0,
+                 child_index: int = -1):
         self.game = game
         self.parent = parent
         self.action = action
@@ -29,6 +31,8 @@ class MCTSNode:
         self.prior = prior
         self.is_expanded = False
         self.solved_value: float | None = None  # +1 = proven win, -1 = proven loss
+        self.child_index = child_index
+        self.path: tuple[int, ...] = parent.path + (child_index,) if parent else ()
 
     @property
     def q_value(self) -> float:
@@ -62,6 +66,15 @@ class MCTSNode:
     def best_move(self) -> Move:
         """Return the most-visited child's move."""
         return max(self.children, key=lambda m: self.children[m].visit_count)
+
+    def get_node(self, path: tuple[int, ...]) -> "MCTSNode":
+        """Retrieve a descendant node by its path of child indices."""
+        node = self
+        children_list_cache: list[MCTSNode] | None = None
+        for idx in path:
+            children_list_cache = list(node.children.values())
+            node = children_list_cache[idx]
+        return node
 
     def visit_counts(self) -> torch.Tensor:
         """Return visit counts as a (g, g) array."""
@@ -167,26 +180,40 @@ class MCTS:
 
         # Create children — coordinates are canonical, decanonicalize for actual moves
         player = node.game.current_player
-        has_terminal_child = False
-        for r, c in torch.nonzero(valid_mask, as_tuple=False):
+        has_winning_child = False
+        has_losing_child = False
+        for idx, (r, c) in enumerate(torch.nonzero(valid_mask, as_tuple=False)):
             r, c = r.item(), c.item()
             canonical_move = Move(row=r, col=c)
             actual_move = canonical_move.decanonicalize(player)
             child_game = node.game.copy()
             child_game.make_move(actual_move)
-            child = MCTSNode(child_game, parent=node, action=canonical_move, prior=policy[r, c].item())
+            child = MCTSNode(child_game, parent=node, action=canonical_move,
+                             prior=policy[r, c].item(), child_index=idx)
             node.children[canonical_move] = child
 
             if child_game.game_over:
-                has_terminal_child = True
+                child.is_expanded = True
+                child.solved_value = 1.0  # winner is child's current_player
+                if child_game.winner == player:
+                    has_winning_child = True
+                else:
+                    has_losing_child = True
 
         node.is_expanded = True
 
-        if self.mcts_config.solve_terminal and has_terminal_child:
-            # Opponent has a winning move — proven loss for current player
-            node.solved_value = -1.0
-            self._propagate_solved(node)
-            return -1.0
+        if self.mcts_config.solve_terminal:
+            if has_winning_child:
+                # Current player has a move that wins immediately
+                node.solved_value = 1.0
+                self._propagate_solved(node)
+                return 1.0
+            elif has_losing_child:
+                # Some children are losses — try propagating from them
+                # (parent is only solved if ALL children are losses)
+                for child in node.children.values():
+                    if child.solved_value is not None:
+                        self._propagate_solved(child)
 
         return value
 

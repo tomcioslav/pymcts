@@ -14,6 +14,7 @@ from bridgit.schema.player import Player
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from bridgit.ai.mcts import MCTSNode
     from bridgit.schema.game_record import GameRecord
 
 
@@ -271,4 +272,57 @@ class Visualizer:
             updatemenus=updatemenus,
         )
 
+        return fig
+
+    @staticmethod
+    def visualize_node(node: MCTSNode) -> go.Figure:
+        """Visualize an MCTS node: board state with children info overlaid.
+
+        Shows the current board state and, for each child, displays
+        its child_index, move, visit count, Q-value, and prior on the
+        board cell where the move would be placed.
+        """
+        state = node.game.state
+        fig = Visualizer.visualize_game_state(state)
+
+        # Node info in title
+        path_str = str(node.path) if node.path else "(root)"
+        q_str = f"{node.q_value:+.3f}" if node.visit_count > 0 else "N/A"
+        solved_str = f" | solved={node.solved_value:+.0f}" if node.solved_value is not None else ""
+        title = (
+            f"Node {path_str} | player={node.game.current_player.name} | "
+            f"visits={node.visit_count} | Q={q_str}{solved_str}"
+        )
+
+        if not node.children:
+            fig.update_layout(title=title)
+            return fig
+
+        # Overlay children info on the board
+        annotations = []
+        for move, child in node.children.items():
+            # The action is in canonical space; decanonicalize for board position
+            actual_move = move.decanonicalize(node.game.current_player)
+            r, c = actual_move.row, actual_move.col
+
+            child_q = f"{child.q_value:+.3f}" if child.visit_count > 0 else "?"
+            solved_tag = f" S={child.solved_value:+.0f}" if child.solved_value is not None else ""
+            label = (
+                f"idx={child.child_index}<br>"
+                f"V={child.visit_count}<br>"
+                f"Q={child_q}<br>"
+                f"P={child.prior:.2f}{solved_tag}"
+            )
+            annotations.append(dict(
+                x=c, y=r,
+                text=label,
+                showarrow=False,
+                font=dict(size=9, color="black"),
+                bgcolor="rgba(255,255,255,0.75)",
+                bordercolor="gray",
+                borderwidth=1,
+                borderpad=2,
+            ))
+
+        fig.update_layout(title=title, annotations=annotations)
         return fig
