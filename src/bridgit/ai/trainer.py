@@ -1,6 +1,7 @@
 """Main training pipeline: self-play → train → evaluate loop."""
 
 import argparse
+import json
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -110,7 +111,7 @@ def train(config: Config, checkpoint_path: str | None = None):
 
         # 2. Train
         print("\n[2/3] Training...")
-        net_wrapper.train_on_examples(all_examples)
+        train_history = net_wrapper.train_on_examples(all_examples, config.training)
 
         # Save post-training checkpoint
         post_checkpoint = iter_dir / "post_training.pt"
@@ -146,6 +147,29 @@ def train(config: Config, checkpoint_path: str | None = None):
         else:
             print("  -> REJECTED: reverting to pre-training weights")
             net_wrapper.load_checkpoint(str(pre_checkpoint))
+
+        # Save iteration data
+        iteration_data = {
+            "iteration": iteration,
+            "training": {
+                "num_examples": len(all_examples),
+                "epochs": train_history,
+                "final_policy_loss": train_history[-1]["policy_loss"],
+                "final_value_loss": train_history[-1]["value_loss"],
+                "final_total_loss": train_history[-1]["total_loss"],
+            },
+            "arena": {
+                "new_wins": result.wins,
+                "prev_wins": result.losses,
+                "total_games": result.total,
+                "win_rate": result.win_rate,
+                "avg_moves_in_wins": result.avg_moves_in_wins,
+                "avg_moves_in_losses": result.avg_moves_in_losses,
+                "accepted": accepted,
+            },
+        }
+        iter_data_path = iter_dir / "iteration_data.json"
+        iter_data_path.write_text(json.dumps(iteration_data, indent=2))
 
         print()
 

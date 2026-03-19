@@ -288,10 +288,9 @@ class Visualizer:
         # Node info in title
         path_str = str(node.path) if node.path else "(root)"
         q_str = f"{node.q_value:+.3f}" if node.visit_count > 0 else "N/A"
-        solved_str = f" | solved={node.solved_value:+.0f}" if node.solved_value is not None else ""
         title = (
             f"Node {path_str} | player={node.game.current_player.name} | "
-            f"visits={node.visit_count} | Q={q_str}{solved_str}"
+            f"visits={node.visit_count} | Q={q_str}"
         )
 
         if not node.children:
@@ -306,12 +305,11 @@ class Visualizer:
             r, c = actual_move.row, actual_move.col
 
             child_q = f"{child.q_value:+.3f}" if child.visit_count > 0 else "?"
-            solved_tag = f" S={child.solved_value:+.0f}" if child.solved_value is not None else ""
             label = (
                 f"idx={child.child_index}<br>"
                 f"V={child.visit_count}<br>"
                 f"Q={child_q}<br>"
-                f"P={child.prior:.2f}{solved_tag}"
+                f"P={child.prior:.2f}"
             )
             annotations.append(dict(
                 x=c, y=r,

@@ -17,10 +17,13 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm.auto import tqdm
 
+from bridgit.data.converter import examples_from_records
 from bridgit.game import Bridgit
-from bridgit.schema import Move
-from bridgit.config import BoardConfig, NeuralNetConfig
+from bridgit.schema import Move, GameRecordCollection
+from bridgit.config import BoardConfig, NeuralNetConfig, TrainingConfig
 
 
 class ResBlock(nn.Module):
@@ -156,6 +159,75 @@ class NetWrapper:
             )
 
         self.model.load_state_dict(checkpoint["model_state_dict"])
+
+    def train_on_examples(
+        self,
+        data: GameRecordCollection | list[tuple[torch.Tensor, torch.Tensor, float]],
+        training_config: TrainingConfig = TrainingConfig(),
+    ) -> list[dict[str, float]]:
+        """Train the model on game records or pre-converted examples.
+
+        Returns a list of per-epoch loss dicts with keys:
+        policy_loss, value_loss, total_loss.
+        """
+        if isinstance(data, GameRecordCollection):
+            examples = examples_from_records(data)
+        else:
+            examples = data
+        states = torch.stack([s for s, _, _ in examples])
+        policies = torch.stack([p for _, p, _ in examples])
+        values = torch.tensor([v for _, _, v in examples], dtype=torch.float32).unsqueeze(1)
+
+        dataset = TensorDataset(states, policies, values)
+        loader = DataLoader(dataset, batch_size=training_config.batch_size, shuffle=True)
+
+        optimizer = torch.optim.Adam(
+            self.model.parameters(),
+            lr=training_config.learning_rate,
+            weight_decay=training_config.weight_decay,
+        )
+
+        self.model.train()
+        history: list[dict[str, float]] = []
+        epoch_iter = tqdm(range(training_config.num_epochs), desc="Training", leave=False)
+        for epoch in epoch_iter:
+            total_policy_loss = 0.0
+            total_value_loss = 0.0
+            num_batches = 0
+
+            for batch_states, batch_policies, batch_values in loader:
+                batch_states = batch_states.to(self.device)
+                batch_policies = batch_policies.to(self.device)
+                batch_values = batch_values.to(self.device)
+
+                log_policy, value = self.model(batch_states)
+
+                # Policy loss: cross-entropy with MCTS target distribution
+                policy_loss = -torch.sum(batch_policies * log_policy) / batch_states.size(0)
+                # Value loss: MSE
+                value_loss = F.mse_loss(value, batch_values)
+                loss = policy_loss + value_loss
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                total_policy_loss += policy_loss.item()
+                total_value_loss += value_loss.item()
+                num_batches += 1
+
+            avg_pi = total_policy_loss / num_batches
+            avg_v = total_value_loss / num_batches
+            history.append({
+                "policy_loss": avg_pi,
+                "value_loss": avg_v,
+                "total_loss": avg_pi + avg_v,
+            })
+            epoch_iter.set_postfix_str(
+                f"pi={avg_pi:.4f}, v={avg_v:.4f}"
+            )
+
+        return history
 
     def make_move(self, game: Bridgit) -> Move:
         """Pick the best legal move."""

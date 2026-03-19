@@ -1,5 +1,6 @@
 """Project configuration using Pydantic."""
 
+import logging
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ class PathsConfig(BaseModel):
     data: Path = _PROJECT_ROOT / "data"
     trainings: Path = _PROJECT_ROOT / "trainings"
 
+paths = PathsConfig()
 
 class BoardConfig(BaseModel):
     """Board / game settings."""
@@ -33,7 +35,6 @@ class MCTSConfig(BaseModel):
     c_puct: float = 1.5
     dirichlet_alpha: float = 1.0
     dirichlet_epsilon: float = 0.25
-    solve_terminal: bool = True  # treat opponent's winning replies as guaranteed losses
 
 
 class NeuralNetConfig(BaseModel):
@@ -58,6 +59,73 @@ class ArenaConfig(BaseModel):
     num_games: int = 40
     threshold: float = 0.55
     swap_players: bool = True
+
+
+_LOGGER_NAMES = {
+    "mcts": "bridgit.mcts",
+    "arena": "bridgit.arena",
+    "game": "bridgit.game",
+}
+
+
+class LoggingSettings:
+    """Controls log levels for bridgit subsystems.
+
+    Usage:
+        from bridgit.config import logging_settings
+        logging_settings.mcts = "DEBUG"
+        logging_settings.arena = "INFO"
+        logging_settings.game = "WARNING"
+    """
+
+    def __init__(self):
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        for logger_name in _LOGGER_NAMES.values():
+            logger = logging.getLogger(logger_name)
+            logger.addHandler(handler)
+            logger.setLevel(logging.WARNING)
+
+    def _set(self, key: str, level: str):
+        logging.getLogger(_LOGGER_NAMES[key]).setLevel(level.upper())
+
+    def _get(self, key: str) -> str:
+        return logging.getLevelName(
+            logging.getLogger(_LOGGER_NAMES[key]).level
+        )
+
+    @property
+    def mcts(self) -> str:
+        return self._get("mcts")
+
+    @mcts.setter
+    def mcts(self, level: str):
+        self._set("mcts", level)
+
+    @property
+    def arena(self) -> str:
+        return self._get("arena")
+
+    @arena.setter
+    def arena(self, level: str):
+        self._set("arena", level)
+
+    @property
+    def game(self) -> str:
+        return self._get("game")
+
+    @game.setter
+    def game(self, level: str):
+        self._set("game", level)
+
+    def __repr__(self) -> str:
+        return f"LoggingSettings(mcts={self.mcts!r}, arena={self.arena!r}, game={self.game!r})"
+
+
+logging_settings = LoggingSettings()
 
 
 class Config(BaseModel):

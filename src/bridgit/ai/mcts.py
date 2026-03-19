@@ -1,6 +1,8 @@
 """Monte Carlo Tree Search with neural network guidance."""
 
+import logging
 import math
+import uuid
 
 import numpy as np
 import torch
@@ -11,13 +13,15 @@ from bridgit.game import Bridgit
 from bridgit.schema import Move
 from bridgit.config import MCTSConfig
 
+logger = logging.getLogger("bridgit.mcts")
+
 
 class MCTSNode:
     """A node in the MCTS tree."""
 
     __slots__ = ["game", "parent", "action", "children", "visit_count",
-                 "value_sum", "prior", "is_expanded", "solved_value",
-                 "child_index", "path"]
+                 "value_sum", "prior", "is_expanded",
+                 "child_index", "path", "id"]
 
     def __init__(self, game: Bridgit, parent: "MCTSNode | None" = None,
                  action: Move | None = None, prior: float = 0.0,
@@ -30,9 +34,9 @@ class MCTSNode:
         self.value_sum = 0.0
         self.prior = prior
         self.is_expanded = False
-        self.solved_value: float | None = None  # +1 = proven win, -1 = proven loss
         self.child_index = child_index
         self.path: tuple[int, ...] = parent.path + (child_index,) if parent else ()
+        self.id: str = uuid.uuid4().hex[:8]
 
     @property
     def q_value(self) -> float:
@@ -50,10 +54,6 @@ class MCTSNode:
             return 0.0
 
         same_player = self.game.current_player == self.parent.game.current_player
-        if self.solved_value is not None:
-            sv = self.solved_value if same_player else -self.solved_value
-            return float("inf") if sv == 1.0 else float("-inf")
-
         q = self.q_value if same_player else -self.q_value
         parent_visits = self.parent.visit_count
         exploration = c_puct * self.prior * math.sqrt(parent_visits) / (1 + self.visit_count)
@@ -129,29 +129,24 @@ class MCTS:
             iterator = tqdm(iterator, desc="MCTS", leave=False)
 
         for i in iterator:
-            # Skip if root is already solved
-            if root.solved_value is not None:
-                break
-
             node = root
 
-            # SELECT — skip solved nodes
+            # SELECT
             while node.is_expanded and node.children:
                 node = node.best_child(self.mcts_config.c_puct)
-                if node.solved_value is not None:
-                    break
+                logger.debug("sim %d: SELECT node %s (action=%s, visits=%d, q=%.3f)",
+                             i, node.id, node.action, node.visit_count, node.q_value)
 
-            # If we hit a solved node, backpropagate its known value
-            if node.solved_value is not None:
-                self._backpropagate(node, node.solved_value)
-                continue
-
-            # TERMINAL — current_player is the winner (turn doesn't switch on win)
+            # TERMINAL
             if node.game.game_over:
+                logger.debug("sim %d: node %s is terminal, backprop value=1.0",
+                             i, node.id)
                 self._backpropagate(node, 1.0)
             else:
                 # EXPAND & EVALUATE
                 value = self._expand(node)
+                logger.debug("sim %d: EXPAND node %s -> %d children, nn_value=%.3f",
+                             i, node.id, len(node.children), value)
                 # BACKPROPAGATE
                 self._backpropagate(node, value)
 
@@ -159,7 +154,6 @@ class MCTS:
         """Expand node using neural network. Returns value estimate."""
         if node.game.game_over:
             node.is_expanded = True
-            node.solved_value = 1.0  # current_player is the winner
             return 1.0
 
         policy, value = self._predict(node.game)
@@ -180,8 +174,6 @@ class MCTS:
 
         # Create children — coordinates are canonical, decanonicalize for actual moves
         player = node.game.current_player
-        has_winning_child = False
-        has_losing_child = False
         for idx, (r, c) in enumerate(torch.nonzero(valid_mask, as_tuple=False)):
             r, c = r.item(), c.item()
             canonical_move = Move(row=r, col=c)
@@ -192,68 +184,8 @@ class MCTS:
                              prior=policy[r, c].item(), child_index=idx)
             node.children[canonical_move] = child
 
-            if child_game.game_over:
-                child.is_expanded = True
-                child.solved_value = 1.0  # winner is child's current_player
-                if child_game.winner == player:
-                    has_winning_child = True
-                else:
-                    has_losing_child = True
-
         node.is_expanded = True
-
-        if self.mcts_config.solve_terminal:
-            if has_winning_child:
-                # Current player has a move that wins immediately
-                node.solved_value = 1.0
-                self._propagate_solved(node)
-                return 1.0
-            elif has_losing_child:
-                # Some children are losses — try propagating from them
-                # (parent is only solved if ALL children are losses)
-                for child in node.children.values():
-                    if child.solved_value is not None:
-                        self._propagate_solved(child)
-
         return value
-
-    def _propagate_solved(self, node: MCTSNode):
-        """Propagate proven results up the tree.
-
-        Rules:
-        - If any child is a proven win for me → I'm a proven win
-        - If ALL children are proven losses for me → I'm a proven loss
-
-        A child's solved_value is from its own current_player's perspective,
-        so we must account for player switches.
-        """
-        parent = node.parent
-        while parent is not None:
-            same_player = parent.game.current_player == node.game.current_player
-            # From parent's perspective, what does node's solved value mean?
-            # If same player: same sign. If different player: flip sign.
-            child_value_for_parent = node.solved_value if same_player else -node.solved_value
-
-            if child_value_for_parent == 1.0:
-                # Parent has a child that's a win → parent is a proven win
-                parent.solved_value = 1.0
-            elif child_value_for_parent == -1.0:
-                # This child is a loss for parent. Check if ALL children are losses.
-                all_lost = all(
-                    c.solved_value is not None
-                    and (c.solved_value if parent.game.current_player == c.game.current_player
-                         else -c.solved_value) == -1.0
-                    for c in parent.children.values()
-                )
-                if all_lost:
-                    parent.solved_value = -1.0
-                else:
-                    break  # can't propagate further
-            else:
-                break
-
-            node = parent
-            parent = parent.parent
 
     def _backpropagate(self, node: MCTSNode, value: float):
         """Backpropagate value, flipping sign only when the player changes.
@@ -264,6 +196,9 @@ class MCTS:
         while node is not None:
             node.visit_count += 1
             node.value_sum += value
+            logger.debug("  BACKPROP node %s: value=%.3f, visits=%d, "
+                         "q=%.3f", node.id, value, node.visit_count,
+                         node.q_value)
             if (node.parent is not None
                     and node.game.current_player != node.parent.game.current_player):
                 value = -value
@@ -309,4 +244,7 @@ class MCTS:
     ) -> torch.Tensor:
         """Run MCTS and return action probabilities."""
         root = self._search(game, verbose=verbose)
+        logger.info("MCTS search done: root %s, %d visits, best_move=%s, "
+                     "q=%.3f", root.id, root.visit_count, root.best_move(),
+                     root.best_child(self.mcts_config.c_puct).q_value)
         return self.visit_counts_to_probs(root.visit_counts(), temperature)

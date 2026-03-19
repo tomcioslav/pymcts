@@ -1,5 +1,6 @@
 """Bridgit game — manages turns, win detection, and game flow."""
 
+import logging
 from collections import deque
 
 import numpy as np
@@ -8,6 +9,8 @@ import torch
 from bridgit.game.state import GameState, Player
 from bridgit.schema import Move
 from bridgit.config import BoardConfig
+
+logger = logging.getLogger("bridgit.game")
 
 
 class Bridgit:
@@ -46,18 +49,28 @@ class Bridgit:
     def make_move(self, move: Move) -> bool:
         """Make a move on the board. Returns True if successful."""
         if not self.is_valid_move(move):
+            logger.warning("Invalid move (%d,%d) by %s (move_count=%d)",
+                           move.row, move.col,
+                           self.current_player.name, self.move_count)
             return False
         self.state = self.state.make_move(move.row, move.col, self.current_player)
         self.move_count += 1
         self.moves_left_in_turn -= 1
+        logger.debug("Move #%d: (%d,%d) by %s, moves_left=%d",
+                     self.move_count, move.row, move.col,
+                     self.current_player.name, self.moves_left_in_turn)
         if self._check_winner(self.current_player):
             self.winner = self.current_player
             self.game_over = True
+            logger.info("Game over at move #%d: %s wins",
+                        self.move_count, self.winner.name)
         elif self.moves_left_in_turn == 0:
             self.current_player = (
                 Player.VERTICAL if self.current_player == Player.HORIZONTAL else Player.HORIZONTAL
             )
             self.moves_left_in_turn = 2
+            logger.debug("Turn switch -> %s",
+                         self.current_player.name)
         return True
 
     def _check_winner(self, player: Player) -> bool:
