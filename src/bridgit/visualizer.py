@@ -227,13 +227,14 @@ class Visualizer:
             active=0,
             currentvalue=dict(prefix="Step: "),
             steps=[
-                dict(args=[[str(i)], dict(frame=dict(duration=0, redraw=True), mode="immediate")],
+                dict(args=[[str(i)], dict(frame=dict(duration=0, redraw=True),
+                                          transition=dict(duration=0), mode="immediate")],
                      label=str(i), method="animate")
                 for i in range(len(frames))
             ],
         )]
 
-        # Play/pause buttons
+        # Play/pause buttons (instant frame changes, no smooth animation)
         updatemenus = [dict(
             type="buttons",
             showactive=False,
@@ -244,7 +245,7 @@ class Visualizer:
                                       fromcurrent=True, transition=dict(duration=0))]),
                 dict(label="Pause", method="animate",
                      args=[[None], dict(frame=dict(duration=0, redraw=False),
-                                        mode="immediate")]),
+                                        mode="immediate", transition=dict(duration=0))]),
             ],
         )]
 
@@ -273,6 +274,17 @@ class Visualizer:
         )
 
         return fig
+
+    @staticmethod
+    def save_game_html(record: GameRecord, path: str) -> None:
+        """Save an interactive game visualization as a standalone HTML file.
+
+        The resulting file includes all JS/CSS inline and can be opened
+        in any browser without an internet connection.
+        """
+        fig = Visualizer.visualize_game(record)
+        fig.write_html(path, include_plotlyjs=True, full_html=True,
+                       auto_play=False)
 
     @staticmethod
     def visualize_node(node: MCTSNode) -> go.Figure:
