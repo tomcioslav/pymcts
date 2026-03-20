@@ -227,6 +227,11 @@ class NetWrapper:
                 f"pi={avg_pi:.4f}, v={avg_v:.4f}"
             )
 
+        first = history[0]
+        last = history[-1]
+        print(f"  Loss: pi={last['policy_loss']:.4f}, v={last['value_loss']:.4f} "
+              f"(from pi={first['policy_loss']:.4f}, v={first['value_loss']:.4f})")
+
         return history
 
     def make_move(self, game: Bridgit) -> Move:

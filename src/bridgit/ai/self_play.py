@@ -15,19 +15,21 @@ from bridgit.schema.player import Player
 
 logger = logging.getLogger("bridgit.self_play")
 
+_VIRTUAL_LOSS = 1.0
+
 
 class BatchedMCTS:
-    """MCTS that batches neural net calls across multiple trees."""
+    """MCTS that batches neural net calls across multiple trees.
+
+    Supports virtual loss and lazy expansion.
+    """
 
     def __init__(self, net_wrapper: NetWrapper, mcts_config: MCTSConfig):
         self.net_wrapper = net_wrapper
         self.mcts_config = mcts_config
 
     def _predict_batch(self, games: list[Bridgit]) -> list[tuple[torch.Tensor, float]]:
-        """Run neural net on a batch of game states.
-
-        Returns list of (policy, value) tuples, one per game.
-        """
+        """Run neural net on a batch of game states."""
         model = self.net_wrapper.model
         device = self.net_wrapper.device
 
@@ -37,23 +39,24 @@ class BatchedMCTS:
         with torch.no_grad():
             log_policies, values = model(tensors)
 
-        policies = torch.exp(log_policies).cpu()  # (N, g, g)
-        vals = values.cpu()  # (N, 1)
+        # Keep on CPU for tree operations
+        policies = torch.exp(log_policies).cpu()
+        vals = values.cpu()
 
         return [
             (policies[i], vals[i].item())
             for i in range(len(games))
         ]
 
-    def _expand_with_policy(self, node: MCTSNode, policy: torch.Tensor, value: float) -> float:
-        """Expand a node using a pre-computed policy and value."""
+    @staticmethod
+    def _set_priors(node: MCTSNode, policy: torch.Tensor, value: float) -> float:
+        """Store masked/renormalized priors in node.unexpanded_moves."""
         if node.game.game_over:
             node.is_expanded = True
             return 1.0
 
         valid_mask = node.game.to_mask()
 
-        # Mask and renormalize
         policy = policy * valid_mask
         policy_sum = policy.sum()
         if policy_sum > 0:
@@ -66,27 +69,41 @@ class BatchedMCTS:
                 node.is_expanded = True
                 return value
 
-        player = node.game.current_player
-        for idx, (r, c) in enumerate(torch.nonzero(valid_mask, as_tuple=False)):
+        for r, c in torch.nonzero(valid_mask, as_tuple=False):
             r, c = r.item(), c.item()
-            canonical_move = Move(row=r, col=c)
-            actual_move = canonical_move.decanonicalize(player)
-            child_game = node.game.copy()
-            child_game.make_move(actual_move)
-            child = MCTSNode(child_game, parent=node, action=canonical_move,
-                             prior=policy[r, c].item(), child_index=idx)
-            node.children[canonical_move] = child
+            move = Move(row=r, col=c)
+            node.unexpanded_moves[move] = policy[r, c].item()
 
         node.is_expanded = True
         return value
 
     @staticmethod
     def _select_leaf(root: MCTSNode, c_puct: float) -> MCTSNode:
-        """Select a leaf node from the tree."""
+        """Select a leaf node using lazy expansion."""
         node = root
-        while node.is_expanded and node.children:
-            node = node.best_child(c_puct)
+        while node.is_expanded and node.has_candidates:
+            node = node.best_child_or_expand(c_puct)
+            if not node.is_expanded:
+                break
         return node
+
+    @staticmethod
+    def _apply_virtual_loss(node: MCTSNode):
+        """Apply virtual loss along the path from node to root."""
+        n = node
+        while n is not None:
+            n.visit_count += 1
+            n.value_sum -= _VIRTUAL_LOSS
+            n = n.parent
+
+    @staticmethod
+    def _undo_virtual_loss(node: MCTSNode):
+        """Undo virtual loss along the path from node to root."""
+        n = node
+        while n is not None:
+            n.visit_count -= 1
+            n.value_sum += _VIRTUAL_LOSS
+            n = n.parent
 
     @staticmethod
     def _backpropagate(node: MCTSNode, value: float):
@@ -102,64 +119,74 @@ class BatchedMCTS:
     @staticmethod
     def _add_dirichlet_noise(node: MCTSNode, alpha: float, epsilon: float):
         """Add Dirichlet noise to root priors."""
-        if not node.children:
+        all_moves = list(node.children.keys()) + list(node.unexpanded_moves.keys())
+        if not all_moves:
             return
-        moves = list(node.children.keys())
-        noise = np.random.dirichlet([alpha] * len(moves))
-        for i, move in enumerate(moves):
+        noise = np.random.dirichlet([alpha] * len(all_moves))
+        idx = 0
+        for move in list(node.children.keys()):
             node.children[move].prior = (
-                (1 - epsilon) * node.children[move].prior + epsilon * noise[i]
+                (1 - epsilon) * node.children[move].prior + epsilon * noise[idx]
             )
+            idx += 1
+        for move in list(node.unexpanded_moves.keys()):
+            node.unexpanded_moves[move] = (
+                (1 - epsilon) * node.unexpanded_moves[move] + epsilon * noise[idx]
+            )
+            idx += 1
 
     def search_batch(self, games: list[Bridgit]) -> list[MCTSNode]:
-        """Run MCTS for multiple games with batched neural net inference.
-
-        Returns a list of root nodes, one per game.
-        """
+        """Run MCTS for multiple games with batched inference + virtual loss."""
         n = len(games)
+        k = self.mcts_config.num_parallel_leaves
         roots = [MCTSNode(g.copy()) for g in games]
 
         # Initial expansion — batch all roots
         predictions = self._predict_batch([r.game for r in roots])
         for i in range(n):
             policy, value = predictions[i]
-            self._expand_with_policy(roots[i], policy, value)
+            self._set_priors(roots[i], policy, value)
             self._add_dirichlet_noise(
                 roots[i],
                 self.mcts_config.dirichlet_alpha,
                 self.mcts_config.dirichlet_epsilon,
             )
 
-        # Run simulations
         c_puct = self.mcts_config.c_puct
-        for _ in range(self.mcts_config.num_simulations):
-            # Select leaf nodes
-            leaves = [self._select_leaf(root, c_puct) for root in roots]
+        num_sims = self.mcts_config.num_simulations
+        sim = 0
 
-            # Separate terminal vs non-terminal leaves
-            to_predict_idx = []
-            to_predict_games = []
-            for i, leaf in enumerate(leaves):
-                if leaf.game.game_over:
-                    self._backpropagate(leaf, 1.0)
-                elif leaf.is_expanded:
-                    # Already expanded (e.g. all children visited) — just backprop
-                    self._backpropagate(leaf, leaf.q_value if leaf.visit_count > 0 else 0.0)
-                else:
-                    to_predict_idx.append(i)
-                    to_predict_games.append(leaf.game)
+        while sim < num_sims:
+            chunk = min(k, num_sims - sim)
 
-            if not to_predict_games:
-                continue
+            to_predict_leaves: list[MCTSNode] = []
+            to_predict_games: list[Bridgit] = []
 
-            # Batch predict
-            predictions = self._predict_batch(to_predict_games)
+            for i in range(n):
+                for _ in range(chunk):
+                    leaf = self._select_leaf(roots[i], c_puct)
 
-            # Expand and backpropagate
-            for j, idx in enumerate(to_predict_idx):
-                policy, value = predictions[j]
-                value = self._expand_with_policy(leaves[idx], policy, value)
-                self._backpropagate(leaves[idx], value)
+                    if leaf.game.game_over:
+                        self._backpropagate(leaf, 1.0)
+                    elif leaf.is_expanded and not leaf.has_candidates:
+                        self._backpropagate(
+                            leaf, leaf.q_value if leaf.visit_count > 0 else 0.0,
+                        )
+                    else:
+                        self._apply_virtual_loss(leaf)
+                        to_predict_leaves.append(leaf)
+                        to_predict_games.append(leaf.game)
+
+            if to_predict_games:
+                predictions = self._predict_batch(to_predict_games)
+
+                for j, leaf in enumerate(to_predict_leaves):
+                    policy, value = predictions[j]
+                    self._undo_virtual_loss(leaf)
+                    value = self._set_priors(leaf, policy, value)
+                    self._backpropagate(leaf, value)
+
+            sim += chunk
 
         return roots
 
@@ -175,25 +202,12 @@ def batched_self_play(
 ) -> GameRecordCollection:
     """Play self-play games with batched MCTS inference.
 
-    Runs `batch_size` games concurrently. When a game finishes,
-    a new one starts in its slot until all games are complete.
-
-    Args:
-        net_wrapper: Neural net wrapper.
-        board_config: Board configuration.
-        mcts_config: MCTS configuration.
-        num_games: Total games to play.
-        batch_size: Number of concurrent games.
-        temperature: MCTS temperature for move selection.
-        verbose: Show progress bar.
-
-    Returns:
-        GameRecordCollection with all completed games.
+    Runs `batch_size` games concurrently with virtual loss
+    (mcts_config.num_parallel_leaves) for maximum GPU throughput.
     """
     batched_mcts = BatchedMCTS(net_wrapper, mcts_config)
     g = board_config.grid_size
 
-    # Active game slots
     active_size = min(batch_size, num_games)
     games = [Bridgit(board_config) for _ in range(active_size)]
     move_histories: list[list[MoveRecord]] = [[] for _ in range(active_size)]
@@ -206,7 +220,6 @@ def batched_self_play(
         pbar = tqdm(total=num_games, desc="Self-play")
 
     while len(completed) < num_games:
-        # Run batched MCTS for all active games that aren't over
         active_idx = [i for i in range(len(games)) if not games[i].game_over]
         if not active_idx:
             break
@@ -214,7 +227,6 @@ def batched_self_play(
         active_games = [games[i] for i in active_idx]
         roots = batched_mcts.search_batch(active_games)
 
-        # Pick moves and advance games
         for j, i in enumerate(active_idx):
             root = roots[j]
             visit_counts = root.visit_counts()
@@ -223,7 +235,6 @@ def batched_self_play(
             if probs.sum() == 0:
                 probs = games[i].to_mask()
 
-            # Sample move
             flat_idx = torch.multinomial(probs.flatten(), 1).item()
             row, col = divmod(flat_idx, g)
             canonical_move = Move(row=row, col=col)
@@ -241,7 +252,6 @@ def batched_self_play(
                 policy=probs,
             ))
 
-        # Check for completed games and replace them
         for i in range(len(games)):
             if games[i].game_over:
                 record = GameRecord(
@@ -256,19 +266,10 @@ def batched_self_play(
                 if pbar is not None:
                     pbar.update(1)
 
-                logger.debug("Game %d/%d done: %s wins (%d moves)",
-                             len(completed), num_games,
-                             games[i].winner.name, len(move_histories[i]))
-
-                # Start a new game in this slot if needed
                 if games_started < num_games:
                     games[i] = Bridgit(board_config)
                     move_histories[i] = []
                     games_started += 1
-                else:
-                    # Mark as done — replace with a dummy finished game
-                    # so it gets skipped in the active_idx filter
-                    pass  # game_over is already True, will be skipped
 
     if pbar is not None:
         pbar.close()

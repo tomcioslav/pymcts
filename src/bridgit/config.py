@@ -35,6 +35,7 @@ class MCTSConfig(BaseModel):
     c_puct: float = 1.5
     dirichlet_alpha: float = 1.0
     dirichlet_epsilon: float = 0.25
+    num_parallel_leaves: int = 1  # leaves per tree in batched MCTS (virtual loss)
 
 
 class NeuralNetConfig(BaseModel):

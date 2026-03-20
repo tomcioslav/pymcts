@@ -1,12 +1,12 @@
 """Bridgit game — manages turns, win detection, and game flow."""
 
 import logging
-from collections import deque
 
 import numpy as np
 import torch
 
 from bridgit.game.state import GameState, Player
+from bridgit.game.union_find import UnionFind
 from bridgit.schema import Move
 from bridgit.config import BoardConfig
 
@@ -23,8 +23,35 @@ class Bridgit:
         self.current_player = Player.HORIZONTAL
         self.winner: Player | None = None
         self.game_over = False
-        self.move_count = 0          # total moves played
-        self.moves_left_in_turn = 1  # first player gets 1 move, then 2 each
+        self.move_count = 0
+        self.moves_left_in_turn = 1
+
+        g = board_config.grid_size
+        # Union-Find per player: g*g cells + 2 sentinels
+        # sentinel indices: g*g = boundary_start, g*g+1 = boundary_end
+        self._uf = {
+            Player.HORIZONTAL: UnionFind(g * g + 2),
+            Player.VERTICAL: UnionFind(g * g + 2),
+        }
+        self._g = g
+        self._sentinel_start = g * g      # left/top boundary
+        self._sentinel_end = g * g + 1    # right/bottom boundary
+
+        # Connect boundary cells to sentinels
+        # HORIZONTAL: left (col 0) and right (col 2n) at odd rows
+        uf_h = self._uf[Player.HORIZONTAL]
+        for r in range(1, g, 2):
+            uf_h.union(r * g + 0, self._sentinel_start)
+            uf_h.union(r * g + (g - 1), self._sentinel_end)
+
+        # VERTICAL: top (row 0) and bottom (row 2n) at odd columns
+        uf_v = self._uf[Player.VERTICAL]
+        for c in range(1, g, 2):
+            uf_v.union(0 * g + c, self._sentinel_start)
+            uf_v.union((g - 1) * g + c, self._sentinel_end)
+
+    def _cell_idx(self, r: int, c: int) -> int:
+        return r * self._g + c
 
     @property
     def grid(self) -> np.ndarray:
@@ -33,7 +60,7 @@ class Bridgit:
 
     def get_available_moves(self) -> list[Move]:
         """Get list of available moves (empty interior crossings)."""
-        g = 2 * self.n + 1
+        g = self._g
         return [
             Move(row=r, col=c)
             for r in range(1, g - 1) for c in range(1, g - 1)
@@ -53,57 +80,42 @@ class Bridgit:
                            move.row, move.col,
                            self.current_player.name, self.move_count)
             return False
-        self.state = self.state.make_move(move.row, move.col, self.current_player)
+
+        player = self.current_player
+        r, c = move.row, move.col
+        self.state = self.state.make_move(r, c, player)
         self.move_count += 1
         self.moves_left_in_turn -= 1
         logger.debug("Move #%d: (%d,%d) by %s, moves_left=%d",
-                     self.move_count, move.row, move.col,
-                     self.current_player.name, self.moves_left_in_turn)
-        if self._check_winner(self.current_player):
-            self.winner = self.current_player
+                     self.move_count, r, c, player.name, self.moves_left_in_turn)
+
+        # Update Union-Find: union bridge cell with its endpoints
+        uf = self._uf[player]
+        bridge_idx = self._cell_idx(r, c)
+        for er, ec in GameState.endpoints(r, c, player):
+            uf.union(bridge_idx, self._cell_idx(er, ec))
+
+        # Also union endpoints with any adjacent same-player cells
+        for er, ec in GameState.endpoints(r, c, player):
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = er + dr, ec + dc
+                if (0 <= nr < self._g and 0 <= nc < self._g
+                        and self.state.board[nr, nc] == player.value):
+                    uf.union(self._cell_idx(er, ec), self._cell_idx(nr, nc))
+
+        # Check win via Union-Find
+        if uf.connected(self._sentinel_start, self._sentinel_end):
+            self.winner = player
             self.game_over = True
             logger.info("Game over at move #%d: %s wins",
                         self.move_count, self.winner.name)
         elif self.moves_left_in_turn == 0:
             self.current_player = (
-                Player.VERTICAL if self.current_player == Player.HORIZONTAL else Player.HORIZONTAL
+                Player.VERTICAL if player == Player.HORIZONTAL else Player.HORIZONTAL
             )
             self.moves_left_in_turn = 2
-            logger.debug("Turn switch -> %s",
-                         self.current_player.name)
+            logger.debug("Turn switch -> %s", self.current_player.name)
         return True
-
-    def _check_winner(self, player: Player) -> bool:
-        """Check if *player* has won.
-
-        Uses the canonical board (always HORIZONTAL orientation) so the
-        check is a single left-to-right BFS for HORIZONTAL value (-1).
-        """
-        canon = self.state.canonical(player)
-        board = canon.board
-        g = 2 * self.n + 1
-        val = Player.HORIZONTAL.value
-
-        # Seed: canonical player's cells on the left boundary (col 0)
-        start = {(r, 0) for r in range(g) if board[r, 0] == val}
-        if not start:
-            return False
-
-        visited = set(start)
-        queue = deque(start)
-
-        while queue:
-            r, c = queue.popleft()
-            if c == g - 1:
-                return True
-            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < g and 0 <= nc < g and (nr, nc) not in visited:
-                    if board[nr, nc] == val:
-                        visited.add((nr, nc))
-                        queue.append((nr, nc))
-
-        return False
 
     def copy(self) -> "Bridgit":
         """Create a deep copy of the game."""
@@ -116,6 +128,13 @@ class Bridgit:
         new_game.game_over = self.game_over
         new_game.move_count = self.move_count
         new_game.moves_left_in_turn = self.moves_left_in_turn
+        new_game._g = self._g
+        new_game._sentinel_start = self._sentinel_start
+        new_game._sentinel_end = self._sentinel_end
+        new_game._uf = {
+            Player.HORIZONTAL: self._uf[Player.HORIZONTAL].copy(),
+            Player.VERTICAL: self._uf[Player.VERTICAL].copy(),
+        }
         return new_game
 
     def get_result(self, player: Player) -> float | None:
@@ -125,11 +144,8 @@ class Bridgit:
         return 1.0 if self.winner == player else -1.0
 
     def to_tensor(self) -> "torch.Tensor":
-        """Canonical state tensor for the current player. Shape (4, g, g).
-
-        Channels: mine, theirs, playable, moves_left_in_turn (1 or 2).
-        """
-        base = self.state.canonical(self.current_player).to_tensor()  # (3, g, g)
+        """Canonical state tensor for the current player. Shape (4, g, g)."""
+        base = self.state.canonical(self.current_player).to_tensor()
         g = base.shape[1]
         moves_plane = torch.full((1, g, g), self.moves_left_in_turn, dtype=torch.float32)
         return torch.cat([base, moves_plane], dim=0)
