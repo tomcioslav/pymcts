@@ -39,6 +39,13 @@ The minimal contract that MCTS, trainer, arena, and self-play depend on. All gam
 from abc import ABC, abstractmethod
 import torch
 
+class GameState:
+    """Base class for game states. Each game defines its own subclass.
+    The engine passes GameState objects opaquely — only the game and its
+    neural net know the concrete type.
+    """
+    pass
+
 class BaseGame(ABC):
 
     @property
@@ -61,8 +68,25 @@ class BaseGame(ABC):
         """Total number of possible actions. Fixed for a game type, not state-dependent."""
 
     @abstractmethod
+    def get_state(self) -> GameState:
+        """Return the current game state from the current player's perspective.
+        Canonicalization is the game's responsibility — the returned state
+        should always be from the current player's POV.
+        The engine treats this as opaque. Only the game's neural net
+        knows the concrete type and how to encode it into tensors.
+        """
+
+    @abstractmethod
+    def to_mask(self) -> torch.Tensor:
+        """1D boolean tensor of length action_space_size.
+        True = legal action. Matches the action index space.
+        """
+
     def valid_actions(self) -> list[int]:
-        """List of currently legal action indices."""
+        """List of currently legal action indices.
+        Default implementation derives from to_mask(). Override for performance if needed.
+        """
+        return self.to_mask().nonzero(as_tuple=False).squeeze(-1).tolist()
 
     @abstractmethod
     def make_action(self, action: int) -> None:
@@ -70,19 +94,6 @@ class BaseGame(ABC):
         The game internally handles any canonicalization
         (e.g., if the current player is VERTICAL in Bridgit,
         the game transposes the action coordinates internally).
-        """
-
-    @abstractmethod
-    def to_tensor(self) -> torch.Tensor:
-        """State from the current player's perspective.
-        Shape is game-defined. The generic engine never inspects it.
-        Canonicalization is the game's responsibility.
-        """
-
-    @abstractmethod
-    def to_mask(self) -> torch.Tensor:
-        """1D boolean tensor of length action_space_size.
-        True = legal action. Matches the action index space.
         """
 
     @abstractmethod
@@ -96,8 +107,8 @@ class BaseGame(ABC):
 **Key design decisions:**
 - Players are ints (0, 1, ...), not enums, in the generic layer.
 - Actions are ints (0 to `action_space_size - 1`). The game maps these to whatever internal representation it uses.
-- `to_tensor()` always returns the current player's perspective. A Bridgit game transposes for VERTICAL. A chess game might flip the board for black. A symmetric game does nothing. The engine doesn't know or care.
-- `to_mask()` is 1D. Even for 2D board games, the mask is flattened. The neural net's policy head outputs the same 1D shape.
+- **Game state is opaque to the engine.** `get_state()` returns a `GameState` subclass that the engine passes to `BaseNeuralNet.predict()` without inspecting. The neural net knows the concrete type and encodes it into tensors internally. This decouples the game from the net architecture — you can try a ResNet and a Transformer on the same game without changing the Game class.
+- `to_mask()` stays on `BaseGame` because legality is a game concept, not an architecture concept. It is 1D — even for 2D board games, the mask is flattened.
 - `action_space_size` is fixed for a game type — it represents all moves that could ever be legal, not just those legal in the current state. The mask filters.
 
 ### Board2DGame
@@ -139,28 +150,25 @@ class Board2DGame(BaseGame):
 The contract for neural networks. The engine calls `predict`, `predict_batch`, and `train_on_examples`. It never inspects tensor shapes.
 
 ```python
-class BaseNeuralNet(ABC):
+class BaseNeuralNet(ABC, nn.Module):
+    """Base class for all neural networks. Inherits from both ABC and nn.Module,
+    so subclasses are standard PyTorch modules with forward(), parameters(), etc.
+    """
+
+    # --- Abstract: the developer implements these ---
 
     @abstractmethod
-    def predict(self, state: torch.Tensor) -> tuple[torch.Tensor, float]:
-        """Single state -> (policy, value).
-        policy: 1D tensor of length action_space_size (log-probabilities).
-        value: float in [-1, 1].
+    def encode(self, state: GameState) -> torch.Tensor:
+        """Convert a GameState into the tensor format this architecture expects.
+        A ResNet might return (4, g, g). A Transformer might return (seq_len, d_model).
+        This is where game state meets architecture.
         """
 
     @abstractmethod
-    def predict_batch(self, states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Batch of states -> (policies, values).
-        policies: (batch, action_space_size).
-        values: (batch,).
-        """
-
-    @abstractmethod
-    def train_on_examples(
-        self, examples: list[tuple[torch.Tensor, torch.Tensor, float]]
-    ) -> dict:
-        """Train on (state_tensor, policy_target_1D, value_target) tuples.
-        Returns metrics dict {"loss": ..., "policy_loss": ..., "value_loss": ...}.
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Raw forward pass on a batch of encoded tensors.
+        Input: (batch, *encoded_shape)
+        Returns: (log_policy (batch, action_space_size), value (batch, 1))
         """
 
     @abstractmethod
@@ -172,13 +180,39 @@ class BaseNeuralNet(ABC):
     @abstractmethod
     def copy(self) -> "BaseNeuralNet":
         """Deep copy for arena comparison (current vs new)."""
+
+    # --- Concrete defaults: work out of the box ---
+
+    def predict(self, state: GameState) -> tuple[torch.Tensor, float]:
+        """Single state -> (policy_1D, value). Encodes, forwards, unwraps batch dim."""
+        tensor = self.encode(state).unsqueeze(0)
+        policy, value = self.forward(tensor)
+        return policy.squeeze(0), value.item()
+
+    def predict_batch(self, states: list[GameState]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Batch of states -> (policies, values). Encodes each, stacks, forwards."""
+        tensors = torch.stack([self.encode(s) for s in states])
+        policies, values = self.forward(tensors)
+        return policies, values.squeeze(-1)
+
+    def train_on_examples(
+        self, examples: list[tuple[GameState, torch.Tensor, float]]
+    ) -> dict:
+        """Default training loop: cross-entropy policy loss + MSE value loss.
+        Override for custom training (LR schedules, gradient clipping, etc.).
+        Returns metrics dict {"loss": ..., "policy_loss": ..., "value_loss": ...}.
+        """
+        # Default implementation encodes all states, computes standard losses,
+        # runs optimizer step. Concrete class provides self.optimizer, self.device, etc.
 ```
 
 **Key decisions:**
-- Policy output is always **1D** of length `action_space_size`. If BridgitNet uses a (g,g) conv head internally, it flattens before returning. The engine never sees 2D.
-- `train_on_examples` takes the universal format: `list[tuple[state_tensor, 1D_policy_target, value_float]]`. The game developer decides how to handle the training loop internally (optimizer, loss functions, epochs).
+- **The developer implements `encode()` and `forward()`.** Everything else has concrete defaults. `predict`, `predict_batch`, and `train_on_examples` work out of the box.
+- **`encode()` is the decoupling point.** A ResNet encodes `BridgitGameState` into (4, g, g) channels. A Transformer encodes the same state into a token sequence. The Game class doesn't change.
+- Policy output is always **1D** of length `action_space_size`. If BridgitNet uses a (g,g) conv head internally, `forward()` flattens before returning. The engine never sees 2D.
+- `train_on_examples` has a sensible default (cross-entropy + MSE, Adam optimizer) but can be overridden for custom training logic.
 - `copy()` is needed for the arena pattern (compare new weights vs old).
-- **Device management** (CPU/GPU/MPS) is the `BaseNeuralNet` implementation's responsibility. The engine never calls `.to(device)` — the net handles it internally in `predict`, `predict_batch`, and `train_on_examples`.
+- **Device management** (CPU/GPU/MPS) is the `BaseNeuralNet` implementation's responsibility. The engine never calls `.to(device)` — the net handles it internally.
 
 ## Generic Engine Components
 
@@ -191,8 +225,8 @@ class BaseNeuralNet(ABC):
 - Priors become `dict[int, float]` (action index → prior probability), replacing the current `dict[Move, float]`.
 - `visit_counts` becomes a 1D array of length `action_space_size` or `dict[int, int]`.
 - Tree expansion: `game.copy()` then `game.make_action(action)`.
-- Policy from net: 1D tensor, indexed by action int. Setting priors is simply `{a: policy[a] for a in game.valid_actions()}`.
-- No canonicalize/decanonicalize — the game handles it inside `make_action()` and `to_tensor()`.
+- Neural net evaluation: `net.predict(game.get_state())` returns 1D policy. Setting priors is simply `{a: policy[a] for a in game.valid_actions()}`.
+- No canonicalize/decanonicalize — the game handles it inside `make_action()` and `get_state()`.
 - **Player-switching and Q-value sign flip:** The current UCB logic flips Q-value sign when parent and child have different `current_player`. This carries forward unchanged — it works with `current_player` as `int` and correctly handles multi-move turns (e.g., Bridgit's 2-moves-per-turn) because the comparison is per-node, not per-turn.
 
 ### Batched Self-Play
@@ -202,7 +236,7 @@ class BaseNeuralNet(ABC):
 **After refactor:**
 - Receives a `game_factory: Callable[[], BaseGame]` — no game import.
 - Actions are ints — `torch.multinomial` on the 1D policy returns an int directly.
-- `moves_left_in_turn` disappears from the generic layer. It is a Bridgit-specific turn mechanic — `BridgitGame.to_tensor()` continues to include it as an input channel (channel 3: a constant plane encoding moves left in the current turn). This is invisible to the engine, which just passes the tensor to the net.
+- `moves_left_in_turn` disappears from the generic layer. It is a Bridgit-specific turn mechanic — `BridgitGameState` carries it, and `BridgitNet.encode()` includes it as an input channel. Invisible to the engine, which just passes `GameState` to the net.
 - Records `(action: int, player: int, policy: Tensor | None)` per move.
 
 ### Trainer
@@ -301,7 +335,7 @@ These are already mostly game-agnostic — they just count wins/losses. The only
 **After refactor:**
 - Receives `game_factory` (constructed from `game_record.game_config`).
 - Replays via `game.make_action(move_rec.action)`.
-- Extracts `(game.to_tensor(), move_rec.policy, value)` tuples.
+- Extracts `(game.get_state(), move_rec.policy, value)` tuples — the net encodes the `GameState` during training.
 - Value determined by comparing `game.current_player` with `record.winner`.
 
 ### Config
@@ -321,13 +355,13 @@ These are already mostly game-agnostic — they just count wins/losses. The only
 
 The engine does **not** handle canonicalization. This is entirely the game developer's responsibility. The contract is:
 
-1. `to_tensor()` returns the state from the current player's perspective.
+1. `get_state()` returns the state from the current player's perspective.
 2. `to_mask()` returns legal actions from the current player's perspective.
 3. `make_action(action)` accepts actions in the current player's canonical space.
 4. The neural net is trained on canonical states, so it always "thinks" it's the same player.
 
 **How Bridgit implements this:**
-- HORIZONTAL is the canonical perspective. When it's VERTICAL's turn, `to_tensor()` transposes the board and negates values. `to_mask()` transposes. `make_action(action)` un-transposes the action before placing.
+- HORIZONTAL is the canonical perspective. When it's VERTICAL's turn, `get_state()` returns a `BridgitGameState` with the board transposed and negated. `to_mask()` transposes. `make_action(action)` un-transposes the action before placing.
 
 **How another game might do it:**
 - Chess: always orient from white's perspective, flip for black, or add a "current player" channel to the tensor and never flip. Developer's choice.
@@ -337,10 +371,11 @@ The engine does **not** handle canonicalization. This is entirely the game devel
 
 To add a new game to this engine:
 
-1. **`MyGame(Board2DGame)` or `MyGame(BaseGame)`** — implement all abstract methods.
-2. **`MyNet(BaseNeuralNet)`** — implement predict, train, checkpoint methods. Input shape must match `MyGame.to_tensor()` output. Policy output length must match `MyGame.action_space_size`.
-3. **Game config** — whatever params the game needs (board size, etc.).
-4. **A factory function** — `def create_game(config) -> MyGame` and `def create_net(config) -> MyNet`.
+1. **`MyGameState(GameState)`** — a dataclass/class holding the game's state representation (board, metadata, etc.).
+2. **`MyGame(Board2DGame)` or `MyGame(BaseGame)`** — implement all abstract methods. `get_state()` returns `MyGameState`.
+3. **`MyNet(BaseNeuralNet)`** — implement `encode(state) → tensor` and `forward(tensor) → (policy, value)`. `predict`, `predict_batch`, and `train_on_examples` work automatically. Override `train_on_examples` only if you need custom training logic.
+4. **Game config** — whatever params the game needs (board size, etc.).
+5. **A factory function** — `def create_game(config) -> MyGame` and `def create_net(config) -> MyNet`.
 
 That's it. MCTS, self-play, trainer, arena, players all work automatically.
 
