@@ -188,6 +188,7 @@ def batched_self_play(
     batch_size: int = 8,
     temperature: float = 1.0,
     verbose: bool = True,
+    game_type: str = "self-play",
 ) -> GameRecordCollection:
     """Play self-play games with batched MCTS inference.
 
@@ -243,8 +244,8 @@ def batched_self_play(
         for i in range(len(games)):
             if games[i].is_over and i not in recorded:
                 record = GameRecord(
-                    game_type="self-play",
-                    game_config={},
+                    game_type=game_type,
+                    game_config=games[i].get_config(),
                     moves=move_histories[i],
                     winner=games[i].winner,
                     player_names=["self-play-0", "self-play-1"],

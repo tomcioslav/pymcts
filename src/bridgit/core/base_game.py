@@ -60,6 +60,14 @@ class BaseGame(ABC):
     def get_result(self, player: int) -> float | None:
         """1.0 for win, -1.0 for loss, 0.0 for draw, None if not over."""
 
+    def get_config(self) -> dict:
+        """Return a serializable config dict that can recreate this game instance.
+
+        Override in subclasses that carry configuration (board size, etc.).
+        The default implementation returns an empty dict.
+        """
+        return {}
+
 
 class Board2DGame(BaseGame):
     """Base for games played on a 2D rectangular grid."""

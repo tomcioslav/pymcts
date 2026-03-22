@@ -226,3 +226,7 @@ class BridgitGame(Board2DGame):
         if not self._game_over:
             return None
         return 1.0 if self.winner == player else -1.0
+
+    def get_config(self) -> dict:
+        """Return config dict for recreating this game instance."""
+        return self._config.model_dump()
