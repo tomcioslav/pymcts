@@ -130,6 +130,8 @@ class Board2DGame(BaseGame):
         return row * self._board_cols + col
 ```
 
+**Note:** `action_space_size` is a concrete property here but can be overridden by subclasses that need a different calculation (e.g., Go with a pass action: `rows * cols + 1`).
+
 **For Bridgit:** `BridgitGame(Board2DGame)` uses `board_rows = board_cols = grid_size` (i.e., `2*n+1`). The action space is `grid_size * grid_size`. Many of those actions are always-illegal (boundary cells, non-crossing cells) — the mask handles this. The wasted policy slots are negligible and this avoids needing a custom index mapping.
 
 ### BaseNeuralNet
@@ -174,8 +176,9 @@ class BaseNeuralNet(ABC):
 
 **Key decisions:**
 - Policy output is always **1D** of length `action_space_size`. If BridgitNet uses a (g,g) conv head internally, it flattens before returning. The engine never sees 2D.
-- `train_on_examples` takes the universal format: (state_tensor, 1D_policy_target, value_float). The game developer decides how to handle the training loop internally (optimizer, loss functions, epochs).
+- `train_on_examples` takes the universal format: `list[tuple[state_tensor, 1D_policy_target, value_float]]`. The game developer decides how to handle the training loop internally (optimizer, loss functions, epochs).
 - `copy()` is needed for the arena pattern (compare new weights vs old).
+- **Device management** (CPU/GPU/MPS) is the `BaseNeuralNet` implementation's responsibility. The engine never calls `.to(device)` — the net handles it internally in `predict`, `predict_batch`, and `train_on_examples`.
 
 ## Generic Engine Components
 
@@ -185,10 +188,12 @@ class BaseNeuralNet(ABC):
 
 **After refactor:**
 - `MCTSNode` stores `action: int`, not `Move`.
+- Priors become `dict[int, float]` (action index → prior probability), replacing the current `dict[Move, float]`.
+- `visit_counts` becomes a 1D array of length `action_space_size` or `dict[int, int]`.
 - Tree expansion: `game.copy()` then `game.make_action(action)`.
-- Policy from net: 1D tensor, indexed by action int.
-- Visit counts: 1D array of length `action_space_size`, or `dict[int, int]`.
+- Policy from net: 1D tensor, indexed by action int. Setting priors is simply `{a: policy[a] for a in game.valid_actions()}`.
 - No canonicalize/decanonicalize — the game handles it inside `make_action()` and `to_tensor()`.
+- **Player-switching and Q-value sign flip:** The current UCB logic flips Q-value sign when parent and child have different `current_player`. This carries forward unchanged — it works with `current_player` as `int` and correctly handles multi-move turns (e.g., Bridgit's 2-moves-per-turn) because the comparison is per-node, not per-turn.
 
 ### Batched Self-Play
 
@@ -197,7 +202,7 @@ class BaseNeuralNet(ABC):
 **After refactor:**
 - Receives a `game_factory: Callable[[], BaseGame]` — no game import.
 - Actions are ints — `torch.multinomial` on the 1D policy returns an int directly.
-- `moves_left_in_turn` disappears from the generic layer (Bridgit-specific turn mechanic).
+- `moves_left_in_turn` disappears from the generic layer. It is a Bridgit-specific turn mechanic — `BridgitGame.to_tensor()` continues to include it as an input channel (channel 3: a constant plane encoding moves left in the current turn). This is invisible to the engine, which just passes the tensor to the net.
 - Records `(action: int, player: int, policy: Tensor | None)` per move.
 
 ### Trainer
@@ -225,15 +230,27 @@ class BaseNeuralNet(ABC):
 
 **After refactor:**
 ```python
-class RandomPlayer:
+class BasePlayer(ABC):
+    last_policy: torch.Tensor | None = None  # 1D, set after get_action
+
+    @abstractmethod
+    def get_action(self, game: BaseGame) -> int: ...
+
+class RandomPlayer(BasePlayer):
     def get_action(self, game: BaseGame) -> int:
+        self.last_policy = None
         return random.choice(game.valid_actions())
 
-class MCTSPlayer:
+class MCTSPlayer(BasePlayer):
     def get_action(self, game: BaseGame) -> int:
-        # Run MCTS, return action int.
+        # Run MCTS, store policy in self.last_policy, return action int.
         # No decanonicalize — game.make_action() handles it.
+
+class GreedyMCTSPlayer(MCTSPlayer):
+    """MCTSPlayer with temperature=0 — always picks most-visited action."""
 ```
+
+`BasePlayer.last_policy` is used by the arena to record MCTS policies alongside moves. `player_factory.py` is removed — the factory pattern (`game_factory`, `net_factory`) replaces serialization-based player reconstruction.
 
 ### GameRecord (Generic)
 
@@ -256,6 +273,27 @@ class GameRecord(BaseModel):
 
 No more `moves_left_after`, no `Player` enum, no `Move` object in the generic layer.
 
+### GameRecordCollection and EvalResult
+
+The current `GameRecordCollection` (aggregates multiple `GameRecord`s) and `EvalResult` (wins, losses, win_rate, avg_moves) move to `core/game_record.py` alongside `MoveRecord` and `GameRecord`. They become generic:
+
+```python
+class EvalResult(BaseModel):
+    wins: int
+    losses: int
+    draws: int
+    win_rate: float
+    avg_moves: float
+
+class GameRecordCollection(BaseModel):
+    records: list[GameRecord]
+
+    def evaluate(self, player_name: str) -> EvalResult: ...
+    def is_better(self, player_name: str, threshold: float) -> bool: ...
+```
+
+These are already mostly game-agnostic — they just count wins/losses. The only change is replacing `Player` enum references with `int` player ids.
+
 ### Data Converter
 
 **Current state:** Replays games using `Bridgit()`, calls `game.to_tensor()`.
@@ -270,9 +308,10 @@ No more `moves_left_after`, no `Player` enum, no `Move` object in the generic la
 
 **Generic configs (stay in `core/`):**
 - `MCTSConfig`: num_simulations, c_puct, dirichlet_alpha, epsilon
-- `NeuralNetConfig`: num_channels, num_res_blocks (reasonable defaults for ResNet-style nets)
 - `TrainingConfig`: epochs, batch_size, lr, weight_decay, replay_buffer_size, num_iterations, num_self_play_games
 - `ArenaConfig`: num_games, threshold, swap_players
+
+**Note:** `NeuralNetConfig` (num_channels, num_res_blocks) moves to `games/bridgit/config.py` since it is ResNet-specific. A game using a transformer or MLP would define its own net config. The generic engine does not need net architecture params — it only calls the `BaseNeuralNet` interface.
 
 **Game-specific configs (move to `games/bridgit/`):**
 - `BoardConfig`: size, grid_size formula (`2*n+1`)
@@ -321,7 +360,7 @@ src/bridgit/
 │   ├── players.py              # RandomPlayer, MCTSPlayer
 │   ├── game_record.py          # Generic MoveRecord, GameRecord
 │   ├── data.py                 # Training data extraction
-│   └── config.py               # MCTSConfig, TrainingConfig, ArenaConfig, NeuralNetConfig
+│   └── config.py               # MCTSConfig, TrainingConfig, ArenaConfig
 ├── games/
 │   └── bridgit/
 │       ├── __init__.py
@@ -333,14 +372,18 @@ src/bridgit/
 │       ├── player.py           # Player enum (HORIZONTAL, VERTICAL) — internal to Bridgit
 │       └── visualizer.py       # Plotly visualization
 ├── __init__.py
-├── config.py                   # Top-level config aggregating core + game configs
-└── visualizer.py               # Could stay here or move to games/bridgit/
+└── config.py                   # Top-level config aggregating core + game configs
 ```
+
+## Scope
+
+This engine targets **two-player zero-sum games**. Multi-player games or cooperative games are explicitly out of scope and would require a spec revision.
 
 ## Migration Notes
 
-- The `schema/` directory dissolves: `Player` enum and `Move` class become Bridgit-internal. `GameRecord` moves to `core/`.
+- The `schema/` directory dissolves: `Player` enum and `Move` class become Bridgit-internal (`games/bridgit/`). `GameRecord`, `GameRecordCollection`, `EvalResult` move to `core/game_record.py`.
 - The `data/` directory becomes `core/data.py`.
-- The `players/` directory splits: generic players go to `core/players.py`, `arena` to `core/arena.py`, `player_factory.py` likely unnecessary (factories replace it).
+- The `players/` directory splits: `BasePlayer`, `RandomPlayer`, `MCTSPlayer`, `GreedyMCTSPlayer` go to `core/players.py`. `Arena` goes to `core/arena.py`. `player_factory.py` is removed.
+- `visualizer.py` moves to `games/bridgit/visualizer.py` (it imports `GameState`, `Move`, `Player` — all Bridgit-specific).
 - Existing notebooks and `play.py` will import from `games/bridgit/` instead of top-level.
 - Tests need updating to match new import paths.
