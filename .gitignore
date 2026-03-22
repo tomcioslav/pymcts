@@ -51,6 +51,9 @@ data/
 *.json
 !pyproject.json
 
+# Worktrees
+.worktrees/
+
 # Misc
 *.log
 .env
