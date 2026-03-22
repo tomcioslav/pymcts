@@ -1,6 +1,2 @@
-"""Bridgit game package"""
-
-from bridgit.game import Bridgit, GameState, Player
-from bridgit.visualizer import Visualizer
-
-__all__ = ['Bridgit', 'GameState', 'Player', 'Visualizer']
+from bridgit.core import BaseGame, Board2DGame, GameState, BaseNeuralNet
+from bridgit.games.bridgit import BridgitGame, BridgitNet
