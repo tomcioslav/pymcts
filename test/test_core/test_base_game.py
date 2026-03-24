@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from bridgit.core.base_game import BaseGame, Board2DGame, GameState
+from pymcts.core.base_game import BaseGame, Board2DGame, GameState
 
 
 class DummyState(GameState):

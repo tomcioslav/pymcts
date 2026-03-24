@@ -3,8 +3,8 @@ import copy
 import torch
 import torch.nn as nn
 
-from bridgit.core.base_game import GameState
-from bridgit.core.base_neural_net import BaseNeuralNet
+from pymcts.core.base_game import GameState
+from pymcts.core.base_neural_net import BaseNeuralNet
 
 
 class SimpleState(GameState):

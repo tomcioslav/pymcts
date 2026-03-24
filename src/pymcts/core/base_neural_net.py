@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from bridgit.core.base_game import GameState
+from pymcts.core.base_game import GameState
 
 
 class BaseNeuralNet(ABC, nn.Module):

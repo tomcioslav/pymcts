@@ -5,10 +5,10 @@ import logging
 import numpy as np
 import torch
 
-from bridgit.core.base_game import Board2DGame, GameState
-from bridgit.games.bridgit.config import BoardConfig
-from bridgit.games.bridgit.player import Player
-from bridgit.games.bridgit.union_find import UnionFind
+from pymcts.core.base_game import Board2DGame, GameState
+from pymcts.games.bridgit.config import BoardConfig
+from pymcts.games.bridgit.player import Player
+from pymcts.games.bridgit.union_find import UnionFind
 
 logger = logging.getLogger("bridgit.games.bridgit")
 

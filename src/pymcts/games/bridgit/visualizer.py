@@ -8,13 +8,13 @@ import numpy as np
 import plotly.graph_objects as go
 import torch
 
-from bridgit.games.bridgit.config import BoardConfig
-from bridgit.games.bridgit.game import BridgitGame, BridgitGameState
-from bridgit.games.bridgit.player import Player
+from pymcts.games.bridgit.config import BoardConfig
+from pymcts.games.bridgit.game import BridgitGame, BridgitGameState
+from pymcts.games.bridgit.player import Player
 
 if TYPE_CHECKING:
-    from bridgit.core.game_record import GameRecord
-    from bridgit.core.mcts import MCTSNode
+    from pymcts.core.game_record import GameRecord
+    from pymcts.core.mcts import MCTSNode
 
 
 class Visualizer:

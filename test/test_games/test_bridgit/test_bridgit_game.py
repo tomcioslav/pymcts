@@ -2,9 +2,9 @@ import random
 
 import torch
 
-from bridgit.games.bridgit.game import BridgitGame, BridgitGameState
-from bridgit.games.bridgit.config import BoardConfig
-from bridgit.core.base_game import BaseGame, Board2DGame, GameState
+from pymcts.games.bridgit.game import BridgitGame, BridgitGameState
+from pymcts.games.bridgit.config import BoardConfig
+from pymcts.core.base_game import BaseGame, Board2DGame, GameState
 
 
 class TestBridgitGame:

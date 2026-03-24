@@ -1,7 +1,7 @@
 from test.test_core.test_mcts import TicTacToe, DummyNet
-from bridgit.core.players import BasePlayer, RandomPlayer, MCTSPlayer
-from bridgit.core.arena import Arena
-from bridgit.core.config import MCTSConfig
+from pymcts.core.players import BasePlayer, RandomPlayer, MCTSPlayer
+from pymcts.core.arena import Arena
+from pymcts.core.config import MCTSConfig
 
 
 class TestRandomPlayer:

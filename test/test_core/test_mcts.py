@@ -6,10 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from bridgit.core.base_game import Board2DGame, GameState
-from bridgit.core.base_neural_net import BaseNeuralNet
-from bridgit.core.config import MCTSConfig
-from bridgit.core.mcts import MCTS, MCTSNode
+from pymcts.core.base_game import Board2DGame, GameState
+from pymcts.core.base_neural_net import BaseNeuralNet
+from pymcts.core.config import MCTSConfig
+from pymcts.core.mcts import MCTS, MCTSNode
 
 
 # ---------------------------------------------------------------------------

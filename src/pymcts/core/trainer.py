@@ -7,13 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from bridgit.core.arena import Arena
-from bridgit.core.base_game import BaseGame
-from bridgit.core.base_neural_net import BaseNeuralNet
-from bridgit.core.config import ArenaConfig, MCTSConfig, PathsConfig, TrainingConfig
-from bridgit.core.data import Example, examples_from_records
-from bridgit.core.players import GreedyMCTSPlayer
-from bridgit.core.self_play import batched_self_play
+from pymcts.core.arena import Arena
+from pymcts.core.base_game import BaseGame
+from pymcts.core.base_neural_net import BaseNeuralNet
+from pymcts.core.config import ArenaConfig, MCTSConfig, PathsConfig, TrainingConfig
+from pymcts.core.data import Example, examples_from_records
+from pymcts.core.players import GreedyMCTSPlayer
+from pymcts.core.self_play import batched_self_play
 
 logger = logging.getLogger("bridgit.core.trainer")
 

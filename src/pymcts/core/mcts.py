@@ -7,9 +7,9 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from bridgit.core.base_game import BaseGame
-from bridgit.core.base_neural_net import BaseNeuralNet
-from bridgit.core.config import MCTSConfig
+from pymcts.core.base_game import BaseGame
+from pymcts.core.base_neural_net import BaseNeuralNet
+from pymcts.core.config import MCTSConfig
 
 logger = logging.getLogger("bridgit.core.mcts")
 

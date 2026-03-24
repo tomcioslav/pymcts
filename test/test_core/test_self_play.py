@@ -2,8 +2,8 @@
 
 from test.test_core.test_mcts import DummyNet, TicTacToe
 
-from bridgit.core.config import MCTSConfig
-from bridgit.core.self_play import batched_self_play
+from pymcts.core.config import MCTSConfig
+from pymcts.core.self_play import batched_self_play
 
 
 class TestBatchedSelfPlay:

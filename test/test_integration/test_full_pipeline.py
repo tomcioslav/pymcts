@@ -1,13 +1,13 @@
 """Smoke test: run a tiny training iteration with the generic engine + Bridgit."""
 
-from bridgit.core.self_play import batched_self_play
-from bridgit.core.arena import Arena
-from bridgit.core.players import RandomPlayer, GreedyMCTSPlayer
-from bridgit.core.data import examples_from_records
-from bridgit.core.config import MCTSConfig
-from bridgit.games.bridgit.game import BridgitGame
-from bridgit.games.bridgit.neural_net import BridgitNet
-from bridgit.games.bridgit.config import BoardConfig
+from pymcts.core.self_play import batched_self_play
+from pymcts.core.arena import Arena
+from pymcts.core.players import RandomPlayer, GreedyMCTSPlayer
+from pymcts.core.data import examples_from_records
+from pymcts.core.config import MCTSConfig
+from pymcts.games.bridgit.game import BridgitGame
+from pymcts.games.bridgit.neural_net import BridgitNet
+from pymcts.games.bridgit.config import BoardConfig
 
 
 class TestFullPipeline:

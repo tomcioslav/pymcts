@@ -4,8 +4,8 @@ from typing import Callable
 
 import torch
 
-from bridgit.core.base_game import BaseGame, GameState
-from bridgit.core.game_record import GameRecordCollection
+from pymcts.core.base_game import BaseGame, GameState
+from pymcts.core.game_record import GameRecordCollection
 
 
 Example = tuple[GameState, torch.Tensor, float]

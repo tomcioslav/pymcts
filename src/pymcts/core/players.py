@@ -5,10 +5,10 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from bridgit.core.base_game import BaseGame
-from bridgit.core.base_neural_net import BaseNeuralNet
-from bridgit.core.mcts import MCTS
-from bridgit.core.config import MCTSConfig
+from pymcts.core.base_game import BaseGame
+from pymcts.core.base_neural_net import BaseNeuralNet
+from pymcts.core.mcts import MCTS
+from pymcts.core.config import MCTSConfig
 
 
 class BasePlayer(ABC):

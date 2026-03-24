@@ -10,9 +10,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from bridgit.core.base_neural_net import BaseNeuralNet
-from bridgit.games.bridgit.config import BoardConfig, NeuralNetConfig
-from bridgit.games.bridgit.game import BridgitGameState
+from pymcts.core.base_neural_net import BaseNeuralNet
+from pymcts.games.bridgit.config import BoardConfig, NeuralNetConfig
+from pymcts.games.bridgit.game import BridgitGameState
 
 
 class ResBlock(nn.Module):

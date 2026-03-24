@@ -1,9 +1,9 @@
 import torch
 
-from bridgit.games.bridgit.game import BridgitGame, BridgitGameState
-from bridgit.games.bridgit.neural_net import BridgitNet
-from bridgit.games.bridgit.config import BoardConfig, NeuralNetConfig
-from bridgit.core.base_neural_net import BaseNeuralNet
+from pymcts.games.bridgit.game import BridgitGame, BridgitGameState
+from pymcts.games.bridgit.neural_net import BridgitNet
+from pymcts.games.bridgit.config import BoardConfig, NeuralNetConfig
+from pymcts.core.base_neural_net import BaseNeuralNet
 
 
 class TestBridgitNet:

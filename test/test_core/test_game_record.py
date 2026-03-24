@@ -1,4 +1,4 @@
-from bridgit.core.game_record import MoveRecord, GameRecord, GameRecordCollection, EvalResult
+from pymcts.core.game_record import MoveRecord, GameRecord, GameRecordCollection, EvalResult
 
 
 class TestGameRecord:

@@ -5,9 +5,9 @@ from typing import Callable
 
 from tqdm.auto import tqdm
 
-from bridgit.core.base_game import BaseGame
-from bridgit.core.players import BasePlayer
-from bridgit.core.game_record import GameRecord, GameRecordCollection, MoveRecord
+from pymcts.core.base_game import BaseGame
+from pymcts.core.players import BasePlayer
+from pymcts.core.game_record import GameRecord, GameRecordCollection, MoveRecord
 
 logger = logging.getLogger("core.arena")
 

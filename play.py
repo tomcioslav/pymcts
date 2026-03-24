@@ -11,9 +11,9 @@ import argparse
 
 import pygame
 
-from bridgit.games.bridgit.config import BoardConfig
-from bridgit.games.bridgit.game import BridgitGame, BridgitGameState
-from bridgit.games.bridgit.player import Player
+from pymcts.games.bridgit.config import BoardConfig
+from pymcts.games.bridgit.game import BridgitGame, BridgitGameState
+from pymcts.games.bridgit.player import Player
 
 # Colors
 BACKGROUND = (245, 245, 250)
