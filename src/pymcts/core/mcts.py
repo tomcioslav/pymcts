@@ -1,5 +1,6 @@
 """Game-agnostic Monte Carlo Tree Search with neural network guidance."""
 
+import itertools
 import logging
 import math
 
@@ -13,7 +14,7 @@ from pymcts.core.config import MCTSConfig
 
 logger = logging.getLogger("bridgit.core.mcts")
 
-_node_counter = 0
+_VIRTUAL_LOSS = 1.0
 
 
 class MCTSNode:
@@ -23,28 +24,19 @@ class MCTSNode:
     (in `unexpanded_moves`). Child nodes are created on demand when selected.
     """
 
-    __slots__ = ["game", "parent", "action", "children", "visit_count",
-                 "value_sum", "prior", "is_expanded", "unexpanded_moves",
-                 "child_index", "path", "id"]
+    __slots__ = ["game", "parent", "children", "visit_count",
+                 "value_sum", "prior", "is_expanded", "unexpanded_moves"]
 
     def __init__(self, game: BaseGame, parent: "MCTSNode | None" = None,
-                 action: int | None = None, prior: float = 0.0,
-                 child_index: int = -1):
-        global _node_counter
+                 prior: float = 0.0):
         self.game = game
         self.parent = parent
-        self.action = action
         self.children: dict[int, MCTSNode] = {}
         self.visit_count = 0
         self.value_sum = 0.0
         self.prior = prior
         self.is_expanded = False
-        # Actions waiting to be turned into child nodes: {action_int: prior}
         self.unexpanded_moves: dict[int, float] = {}
-        self.child_index = child_index
-        self.path: tuple[int, ...] = parent.path + (child_index,) if parent else ()
-        self.id = _node_counter
-        _node_counter += 1
 
     @property
     def q_value(self) -> float:
@@ -67,37 +59,26 @@ class MCTSNode:
         Compares UCB scores of existing children with potential scores of
         unexpanded moves. If an unexpanded move wins, creates the child node.
         """
-        best_score = float("-inf")
-        best_child = None
-        best_unexpanded: int | None = None
-        best_unexpanded_prior = 0.0
-
-        # Score existing children
-        for child in self.children.values():
-            score = child.ucb_score(c_puct)
-            if score > best_score:
-                best_score = score
-                best_child = child
-                best_unexpanded = None
-
-        # Score unexpanded moves
-        for action, prior in self.unexpanded_moves.items():
-            score = self._unexpanded_ucb(action, prior, c_puct)
-            if score > best_score:
-                best_score = score
-                best_child = None
-                best_unexpanded = action
-                best_unexpanded_prior = prior
+        children_scores = (
+            (child.ucb_score(c_puct), child, None)
+            for child in self.children.values()
+        )
+        unexpanded_scores = (
+            (self._unexpanded_ucb(action, prior, c_puct), None, (action, prior))
+            for action, prior in self.unexpanded_moves.items()
+        )
+        best_score, best_child, best_unexpanded = max(
+            itertools.chain(children_scores, unexpanded_scores),
+            key=lambda x: x[0],
+        )
 
         if best_unexpanded is not None:
-            # Create the child node on demand — no decanonicalize needed
+            action, prior = best_unexpanded
             child_game = self.game.copy()
-            child_game.make_action(best_unexpanded)
-            idx = len(self.children)
-            child = MCTSNode(child_game, parent=self, action=best_unexpanded,
-                             prior=best_unexpanded_prior, child_index=idx)
-            self.children[best_unexpanded] = child
-            del self.unexpanded_moves[best_unexpanded]
+            child_game.make_action(action)
+            child = MCTSNode(child_game, parent=self, prior=prior)
+            self.children[action] = child
+            del self.unexpanded_moves[action]
             return child
 
         return best_child
@@ -113,21 +94,9 @@ class MCTSNode:
         exploration = c_puct * self.prior * math.sqrt(parent_visits) / (1 + self.visit_count)
         return q + exploration
 
-    def best_child(self, c_puct: float) -> "MCTSNode":
-        """Select child with highest UCB score (only among existing children)."""
-        return max(self.children.values(), key=lambda c: c.ucb_score(c_puct))
-
     def best_move(self) -> int:
         """Return the most-visited child's action."""
         return max(self.children, key=lambda a: self.children[a].visit_count)
-
-    def get_node(self, path: tuple[int, ...]) -> "MCTSNode":
-        """Retrieve a descendant node by its path of child indices."""
-        node = self
-        for idx in path:
-            children_list = list(node.children.values())
-            node = children_list[idx]
-        return node
 
     def visit_counts(self, action_space_size: int) -> torch.Tensor:
         """Return visit counts as a 1D tensor of length action_space_size."""
@@ -143,66 +112,34 @@ class MCTSNode:
 
 
 class MCTS:
-    """Monte Carlo Tree Search guided by a neural network."""
+    """Monte Carlo Tree Search guided by a neural network.
+
+    Supports both single-game and batched multi-game search.
+    When searching multiple games, uses batched neural net inference
+    and virtual loss for parallel leaf selection.
+    """
 
     def __init__(self, net: BaseNeuralNet, mcts_config: MCTSConfig):
         self.net = net
         self.mcts_config = mcts_config
 
-    def _predict(self, game: BaseGame) -> tuple[torch.Tensor, float]:
-        """Run neural net on game state."""
-        log_policy, value = self.net.predict(game.get_state())
-        policy = torch.exp(log_policy)
-        return policy, value
+    def _predict_batch(self, states: list) -> list[tuple[torch.Tensor, float]]:
+        """Run neural net on a batch of game states."""
+        log_policies, values = self.net.predict_batch(states)
+        policies = torch.exp(log_policies).cpu()
+        vals = values.cpu()
+        return [
+            (policies[i], vals[i].item())
+            for i in range(len(states))
+        ]
 
-    def _search(self, game: BaseGame, verbose: bool = False) -> MCTSNode:
-        """Run MCTS simulations and return the root node."""
-        root = MCTSNode(game.copy())
-        self._expand(root)
-        self._add_dirichlet_noise(root)
-        self.continue_search(root, self.mcts_config.num_simulations, verbose=verbose)
-        return root
-
-    def continue_search(self, root: MCTSNode, num_sims: int, verbose: bool = False):
-        """Continue running MCTS simulations on an existing root node."""
-        iterator = range(num_sims)
-        if verbose:
-            iterator = tqdm(iterator, desc="MCTS", leave=False)
-
-        c_puct = self.mcts_config.c_puct
-        for i in iterator:
-            node = root
-
-            # SELECT — use best_child_or_expand for lazy creation
-            while node.is_expanded and node.has_candidates:
-                node = node.best_child_or_expand(c_puct)
-                if not node.is_expanded:
-                    break  # new unexpanded leaf
-
-            # TERMINAL
-            if node.game.is_over:
-                self._backpropagate(node, 1.0)
-            elif not node.is_expanded:
-                # EXPAND & EVALUATE
-                value = self._expand(node)
-                self._backpropagate(node, value)
-            else:
-                # Fully expanded leaf with no candidates (shouldn't happen normally)
-                self._backpropagate(node, node.q_value if node.visit_count > 0 else 0.0)
-
-    def _expand(self, node: MCTSNode) -> float:
-        """Expand node: run neural net and store priors lazily."""
+    @staticmethod
+    def _set_priors(node: MCTSNode, policy: torch.Tensor, value: float) -> float:
+        """Store masked/renormalized priors in node.unexpanded_moves."""
         if node.game.is_over:
             node.is_expanded = True
             return 1.0
 
-        policy, value = self._predict(node.game)
-        self._set_priors(node, policy)
-        return value
-
-    @staticmethod
-    def _set_priors(node: MCTSNode, policy: torch.Tensor):
-        """Store masked/renormalized priors in node.unexpanded_moves."""
         valid_mask = node.game.to_mask().float()
 
         policy = policy * valid_mask
@@ -215,15 +152,45 @@ class MCTS:
                 policy = valid_mask / total
             else:
                 node.is_expanded = True
-                return
+                return value
 
         for idx in torch.nonzero(valid_mask, as_tuple=False).squeeze(-1):
             action = idx.item()
             node.unexpanded_moves[action] = policy[action].item()
 
         node.is_expanded = True
+        return value
 
-    def _backpropagate(self, node: MCTSNode, value: float):
+    @staticmethod
+    def _select_leaf(root: MCTSNode, c_puct: float) -> MCTSNode:
+        """Select a leaf node using lazy expansion."""
+        node = root
+        while node.is_expanded and node.has_candidates:
+            node = node.best_child_or_expand(c_puct)
+            if not node.is_expanded:
+                break
+        return node
+
+    @staticmethod
+    def _apply_virtual_loss(node: MCTSNode):
+        """Apply virtual loss along the path from node to root."""
+        n = node
+        while n is not None:
+            n.visit_count += 1
+            n.value_sum -= _VIRTUAL_LOSS
+            n = n.parent
+
+    @staticmethod
+    def _undo_virtual_loss(node: MCTSNode):
+        """Undo virtual loss along the path from node to root."""
+        n = node
+        while n is not None:
+            n.visit_count -= 1
+            n.value_sum += _VIRTUAL_LOSS
+            n = n.parent
+
+    @staticmethod
+    def _backpropagate(node: MCTSNode, value: float):
         """Backpropagate value, flipping sign on player boundaries."""
         while node is not None:
             node.visit_count += 1
@@ -233,24 +200,86 @@ class MCTS:
                 value = -value
             node = node.parent
 
-    def _add_dirichlet_noise(self, node: MCTSNode):
+    @staticmethod
+    def _add_dirichlet_noise(node: MCTSNode, alpha: float, epsilon: float):
         """Add Dirichlet noise to root priors for exploration."""
         all_actions = list(node.children.keys()) + list(node.unexpanded_moves.keys())
         if not all_actions:
             return
-        noise = np.random.dirichlet([self.mcts_config.dirichlet_alpha] * len(all_actions))
-        eps = self.mcts_config.dirichlet_epsilon
+        noise = np.random.dirichlet([alpha] * len(all_actions))
         idx = 0
         for action in list(node.children.keys()):
             node.children[action].prior = (
-                (1 - eps) * node.children[action].prior + eps * noise[idx]
+                (1 - epsilon) * node.children[action].prior + epsilon * noise[idx]
             )
             idx += 1
         for action in list(node.unexpanded_moves.keys()):
             node.unexpanded_moves[action] = (
-                (1 - eps) * node.unexpanded_moves[action] + eps * noise[idx]
+                (1 - epsilon) * node.unexpanded_moves[action] + epsilon * noise[idx]
             )
             idx += 1
+
+    def search(self, game: BaseGame) -> MCTSNode:
+        """Run MCTS for a single game. Returns the root node."""
+        return self.search_batch([game])[0]
+
+    def search_batch(self, games: list[BaseGame]) -> list[MCTSNode]:
+        """Run MCTS for one or more games with batched inference.
+
+        Uses virtual loss when num_parallel_leaves > 1.
+        """
+        n = len(games)
+        k = self.mcts_config.num_parallel_leaves
+        roots = [MCTSNode(g.copy()) for g in games]
+
+        # Initial expansion — batch all roots
+        predictions = self._predict_batch([r.game.get_state() for r in roots])
+        for i in range(n):
+            policy, value = predictions[i]
+            self._set_priors(roots[i], policy, value)
+            self._add_dirichlet_noise(
+                roots[i],
+                self.mcts_config.dirichlet_alpha,
+                self.mcts_config.dirichlet_epsilon,
+            )
+
+        c_puct = self.mcts_config.c_puct
+        num_sims = self.mcts_config.num_simulations
+        sim = 0
+
+        while sim < num_sims:
+            chunk = min(k, num_sims - sim)
+
+            to_predict_leaves: list[MCTSNode] = []
+            to_predict_states: list = []
+
+            for i in range(n):
+                for _ in range(chunk):
+                    leaf = self._select_leaf(roots[i], c_puct)
+
+                    if leaf.game.is_over:
+                        self._backpropagate(leaf, 1.0)
+                    elif leaf.is_expanded and not leaf.has_candidates:
+                        self._backpropagate(
+                            leaf, leaf.q_value if leaf.visit_count > 0 else 0.0,
+                        )
+                    else:
+                        self._apply_virtual_loss(leaf)
+                        to_predict_leaves.append(leaf)
+                        to_predict_states.append(leaf.game.get_state())
+
+            if to_predict_states:
+                predictions = self._predict_batch(to_predict_states)
+
+                for j, leaf in enumerate(to_predict_leaves):
+                    policy, value = predictions[j]
+                    self._undo_virtual_loss(leaf)
+                    value = self._set_priors(leaf, policy, value)
+                    self._backpropagate(leaf, value)
+
+            sim += chunk
+
+        return roots
 
     @staticmethod
     def visit_counts_to_probs(
@@ -273,10 +302,9 @@ class MCTS:
         self, game: BaseGame, temperature: float = 1.0, verbose: bool = False,
     ) -> torch.Tensor:
         """Run MCTS and return 1D action probabilities."""
-        root = self._search(game, verbose=verbose)
-        logger.info("MCTS search done: root %d, %d visits, best_action=%d, "
-                     "q=%.3f", root.id, root.visit_count, root.best_move(),
-                     root.best_child(self.mcts_config.c_puct).q_value)
+        root = self.search(game)
+        logger.info("MCTS search done: %d visits, best_action=%d",
+                     root.visit_count, root.best_move())
         return self.visit_counts_to_probs(
             root.visit_counts(game.action_space_size), temperature
         )

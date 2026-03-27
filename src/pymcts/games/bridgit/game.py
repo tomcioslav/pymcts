@@ -131,6 +131,10 @@ class BridgitGame(Board2DGame):
             canonical_board = -self._board.T.copy()
         return BridgitGameState(canonical_board, self._n, self._moves_left_in_turn)
 
+    def get_display_state(self) -> BridgitGameState:
+        """Return absolute board state for visualization."""
+        return BridgitGameState(self._board.copy(), self._n, self._moves_left_in_turn)
+
     def to_mask(self) -> torch.Tensor:
         """1D boolean mask of length action_space_size from canonical perspective."""
         g = self._g

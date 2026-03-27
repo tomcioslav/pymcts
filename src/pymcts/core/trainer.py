@@ -142,7 +142,7 @@ def train(
 
         eval_arena = Arena(
             new_player, prev_player, game_factory,
-            game_type=game_type, game_config=game_config,
+            game_type=game_type,
         )
         eval_records = eval_arena.play_games(
             arena_config.num_games, verbose=verbose,

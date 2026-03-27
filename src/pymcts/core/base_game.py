@@ -39,7 +39,15 @@ class BaseGame(ABC):
     def get_state(self) -> GameState:
         """Return current game state from the current player's perspective.
         Canonicalization is the game's responsibility.
+        Used by the engine and neural net.
         """
+
+    def get_display_state(self) -> GameState:
+        """Return current game state in absolute (non-canonical) form.
+        Used for visualization and external display.
+        Defaults to get_state() if not overridden.
+        """
+        return self.get_state()
 
     @abstractmethod
     def to_mask(self) -> torch.Tensor:

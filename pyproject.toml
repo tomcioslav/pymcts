@@ -8,10 +8,13 @@ authors = [
     { name = "Tomasz Juszczyszyn" }
 ]
 dependencies = [
+    "jupyter>=1.1.1",
     "numpy>=1.24.0",
+    "plotly>=6.6.0",
     "pydantic>=2.12.5",
     "pygame>=2.5.0",
     "pytest>=9.0.2",
+    "torch>=2.10.0",
     "tqdm>=4.60.0",
 ]
 

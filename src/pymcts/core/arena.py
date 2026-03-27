@@ -19,13 +19,11 @@ class Arena:
         player_b: BasePlayer,
         game_factory: Callable[[], BaseGame],
         game_type: str = "unknown",
-        game_config: dict | None = None,
     ):
         self.player_a = player_a
         self.player_b = player_b
         self.game_factory = game_factory
         self.game_type = game_type
-        self.game_config = game_config or {}
 
     def play_game(self, swapped: bool = False) -> GameRecord:
         game = self.game_factory()
@@ -58,7 +56,7 @@ class Arena:
 
         return GameRecord(
             game_type=self.game_type,
-            game_config=self.game_config,
+            game_config=game.get_config(),
             moves=move_records,
             winner=game.winner,
             player_names=names,

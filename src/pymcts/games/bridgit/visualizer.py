@@ -131,12 +131,12 @@ class Visualizer:
         config = BoardConfig(**record.game_config)
         g = config.grid_size
 
-        # Replay game to collect board states at each step
+        # Replay game to collect absolute board states at each step
         game = BridgitGame(config)
-        states: list[BridgitGameState] = [game.get_state()]
+        states: list[BridgitGameState] = [game.get_display_state()]
         for rec in record.moves:
             game.make_action(rec.action)
-            states.append(game.get_state())
+            states.append(game.get_display_state())
 
         # Map player int ids to names
         player_names = record.player_names
@@ -301,15 +301,14 @@ class Visualizer:
     def visualize_node(node: MCTSNode) -> go.Figure:
         """Visualize an MCTS node: board state with children info overlaid."""
         game: BridgitGame = node.game
-        state = game.get_state()
+        state = game.get_display_state()
         fig = Visualizer.visualize_game_state(state)
 
         # Node info in title
-        path_str = str(node.path) if node.path else "(root)"
         q_str = f"{node.q_value:+.3f}" if node.visit_count > 0 else "N/A"
         player_name = game._current_player.name
         title = (
-            f"Node {path_str} | player={player_name} | "
+            f"player={player_name} | "
             f"visits={node.visit_count} | Q={q_str}"
         )
 
