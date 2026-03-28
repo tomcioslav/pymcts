@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from pymcts.core.arena import Arena
+from pymcts.core.arena import batched_arena
 from pymcts.core.base_game import BaseGame
 from pymcts.core.base_neural_net import BaseNeuralNet
 from pymcts.core.config import ArenaConfig, MCTSConfig, PathsConfig, TrainingConfig
@@ -62,6 +62,17 @@ def train(
 
     run_dir = _create_run_dir(paths)
 
+    # Save run config so models can be loaded later
+    run_config = {
+        "mcts_config": mcts_config.model_dump(),
+        "training_config": training_config.model_dump(),
+        "arena_config": arena_config.model_dump(),
+        "game_type": game_type,
+        "game_config": game_config,
+    }
+    run_config_path = run_dir / "run_config.json"
+    run_config_path.write_text(json.dumps(run_config, indent=2))
+
     if verbose:
         print(f"Training run directory: {run_dir}")
         param_count = sum(p.numel() for p in net.parameters())
@@ -72,6 +83,9 @@ def train(
     replay_buffer: deque[list[Example]] = deque(
         maxlen=training_config.replay_buffer_size,
     )
+
+    # Best accepted model checkpoints (most recent last), up to 10
+    best_checkpoints: deque[tuple[int, str]] = deque(maxlen=10)
 
     # game_factory wrapper for examples_from_records (takes config dict)
     def _game_from_config(cfg: dict) -> BaseGame:
@@ -125,50 +139,86 @@ def train(
             batch_size=training_config.batch_size,
             learning_rate=training_config.learning_rate,
             weight_decay=training_config.weight_decay,
+            verbose=verbose,
         )
 
         # Save post-training checkpoint
         post_checkpoint = str(iter_dir / "post_training.pt")
         net.save_checkpoint(post_checkpoint)
 
-        # 3. Evaluate
+        # 3. Evaluate — new model vs previous
         if verbose:
             print("\n[3/3] Arena evaluation...")
+            print("  vs previous model:")
+
         new_player = GreedyMCTSPlayer(net, mcts_config, name="new")
 
         prev_net = net.copy()
         prev_net.load_checkpoint(pre_checkpoint)
         prev_player = GreedyMCTSPlayer(prev_net, mcts_config, name="prev")
 
-        eval_arena = Arena(
-            new_player, prev_player, game_factory,
-            game_type=game_type,
-        )
-        eval_records = eval_arena.play_games(
-            arena_config.num_games, verbose=verbose,
+        eval_records = batched_arena(
+            player_a=new_player,
+            player_b=prev_player,
+            game_factory=game_factory,
+            num_games=arena_config.num_games,
+            batch_size=arena_config.num_games,
             swap_players=arena_config.swap_players,
+            game_type=game_type,
+            verbose=verbose,
         )
-
-        # Save eval games
-        eval_path = iter_dir / "eval_games.json"
-        eval_path.write_text(eval_records.model_dump_json(indent=2))
 
         result = eval_records.evaluate("new")
         accepted = eval_records.is_better("new", arena_config.threshold)
 
         if verbose:
-            print(f"  New model: {result.wins} wins | Previous: {result.losses} wins | "
+            print(f"  New: {result.wins} wins | Prev: {result.losses} wins | "
                   f"Win rate: {result.win_rate:.1%}")
-            print(f"  Avg moves - wins: {result.avg_moves_in_wins:.1f}, "
-                  f"losses: {result.avg_moves_in_losses:.1f}")
+
+        # Evaluate vs past best models
+        historical_results = {}
+        if best_checkpoints:
+            if verbose:
+                print(f"\n  vs past best models ({len(best_checkpoints)}):")
+            for past_iter, past_path in best_checkpoints:
+                past_net = net.copy()
+                past_net.load_checkpoint(past_path)
+                past_player = GreedyMCTSPlayer(past_net, mcts_config, name=f"iter_{past_iter:03d}")
+
+                past_records = batched_arena(
+                    player_a=new_player,
+                    player_b=past_player,
+                    game_factory=game_factory,
+                    num_games=arena_config.num_games,
+                    batch_size=arena_config.num_games,
+                    swap_players=arena_config.swap_players,
+                    game_type=game_type,
+                    verbose=verbose,
+                )
+
+                past_result = past_records.evaluate("new")
+                historical_results[past_iter] = {
+                    "wins": past_result.wins,
+                    "losses": past_result.losses,
+                    "win_rate": past_result.win_rate,
+                }
+                if verbose:
+                    print(f"    vs iter {past_iter:03d}: "
+                          f"{past_result.wins}W/{past_result.losses}L "
+                          f"({past_result.win_rate:.0%})")
 
         if accepted:
             if verbose:
-                print("  -> ACCEPTED: new model is better")
+                print("\n  -> ACCEPTED: new model is better")
+            best_checkpoints.append((iteration, post_checkpoint))
         else:
             if verbose:
-                print("  -> REJECTED: reverting to pre-training weights")
+                print("\n  -> REJECTED: reverting to pre-training weights")
             net.load_checkpoint(pre_checkpoint)
+
+        # Save eval games
+        eval_path = iter_dir / "eval_games.json"
+        eval_path.write_text(eval_records.model_dump_json(indent=2))
 
         # Save iteration data
         iteration_data = {
@@ -184,6 +234,7 @@ def train(
                 "win_rate": result.win_rate,
                 "accepted": accepted,
             },
+            "historical_arena": historical_results,
         }
         iter_data_path = iter_dir / "iteration_data.json"
         iter_data_path.write_text(json.dumps(iteration_data, indent=2))
