@@ -133,15 +133,17 @@ Since all players start unrated, first-round pairings are randomized (shuffled).
 
 If odd number of players, the lowest-rated player that hasn't had a bye gets paired against RandomPlayer (extra games against the anchor improve calibration). This counts as a normal match.
 
-### Arena Integration
+### Arena Refactor
 
-The current `batched_arena()` takes two `BaseNeuralNet` instances. For the Elo system, we need to support `BasePlayer` vs `BasePlayer` matchups (including `RandomPlayer` which has no neural net).
+The current `batched_arena()` takes two `BaseNeuralNet` instances. This is refactored to accept two `BasePlayer` instances instead — after all, it's players who enter the arena.
 
-The tournament module will include a `play_match()` function that handles this:
-- If both players are `MCTSPlayer` variants → use `batched_arena()` with their respective nets and MCTS configs
-- If one or both players are non-MCTS (e.g., `RandomPlayer`) → fall back to a sequential game loop using `BasePlayer.get_action()`
+**How it works:**
+- `batched_arena()` signature changes from `(net_a: BaseNeuralNet, net_b: BaseNeuralNet, mcts_config: MCTSConfig, ...)` to `(player_a: BasePlayer, player_b: BasePlayer, ...)`
+- For `MCTSPlayer` pairs: extracts the MCTS engines and uses batched inference (same performance as before)
+- For `RandomPlayer` or mixed pairs: falls back to sequential `player.get_action()` calls (batch_size=1 effectively)
+- `trainer.py` is updated to create `MCTSPlayer`/`GreedyMCTSPlayer` instances and pass them to `batched_arena()`, using `MCTSPlayer.from_training_iteration()` for loading checkpoints
 
-This avoids modifying the existing `batched_arena()` function.
+This unifies the arena interface and makes it directly usable by the Elo tournament system with no adapter layer.
 
 ## Training Integration
 
@@ -217,16 +219,6 @@ class RatedPlayer(BaseModel):
     @classmethod
     def from_random(cls, name: str = "random") -> "RatedPlayer": ...
 
-def play_match(
-    player_a: RatedPlayer,
-    player_b: RatedPlayer,
-    game_factory: Callable[[], BaseGame],
-    num_games: int = 40,
-    swap_players: bool = True,
-    batch_size: int = 8,
-) -> MatchResult:
-    """Play a match between two players, return aggregated result."""
-
 def run_tournament(
     players: list[RatedPlayer],
     game_factory: Callable[[], BaseGame],
@@ -235,6 +227,7 @@ def run_tournament(
 ) -> TournamentResult:
     """Run a Swiss-style tournament.
 
+    Uses batched_arena() directly for each matchup (now accepts BasePlayer).
     If previous_results provided, incorporates existing match history
     (avoids replaying known matchups).
     """
@@ -249,7 +242,7 @@ Contains: `MatchResult`, `EloRating`, `TournamentConfig`, `TournamentResult` (as
 ```python
 from pymcts.elo.config import MatchResult, EloRating, TournamentConfig, TournamentResult
 from pymcts.elo.rating import compute_elo_ratings
-from pymcts.elo.tournament import RatedPlayer, play_match, run_tournament
+from pymcts.elo.tournament import RatedPlayer, run_tournament
 ```
 
 ## Training Integration Changes
@@ -263,9 +256,16 @@ Add three fields to `TrainingConfig`:
 
 ### `core/trainer.py`
 
-After the existing arena evaluation block, add an Elo tracking block (guarded by `if training_config.elo_tracking`):
+Two changes:
+
+**1. Refactor to use players instead of raw nets:**
+- Create `GreedyMCTSPlayer` instances wrapping the nets
+- Pass players to `batched_arena()` instead of `(net_a, net_b, mcts_config)`
+- Use `MCTSPlayer.from_training_iteration()` for loading historical checkpoints
+
+**2. Add Elo tracking block** (guarded by `if training_config.elo_tracking`):
 1. Wrap current checkpoint as `RatedPlayer`
-2. Play against reference pool
+2. Play against reference pool via `batched_arena()`
 3. Recompute ratings
 4. Log Elo
 5. Optionally add to reference pool
