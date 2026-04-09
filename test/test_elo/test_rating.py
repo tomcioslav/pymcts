@@ -1,7 +1,7 @@
 import pytest
 
 from pymcts.elo.config import MatchResult, EloRating
-from pymcts.elo.rating import compute_elo_ratings
+from pymcts.elo.rating import compute_elo_ratings, compute_elo_against_pool
 
 
 class TestComputeEloRatings:
@@ -71,3 +71,45 @@ class TestComputeEloRatings:
         by_name = {r.name: r for r in ratings}
         assert by_name["god"].rating > 1000.0
         assert by_name["god"].rating < 5000.0  # finite, not infinity
+
+
+class TestComputeEloAgainstPool:
+    def test_candidate_stronger_than_pool(self):
+        """A candidate who beats the pool should get a high rating."""
+        pool_ratings = {"random": 1000.0, "weak": 800.0}
+        match_results = [
+            MatchResult(player_a="candidate", player_b="random", wins_a=8, wins_b=2, draws=0),
+            MatchResult(player_a="candidate", player_b="weak", wins_a=9, wins_b=1, draws=0),
+        ]
+        elo = compute_elo_against_pool("candidate", pool_ratings, match_results)
+        assert elo > 1000.0
+
+    def test_candidate_weaker_than_pool(self):
+        """A candidate who loses to the pool should get a low rating."""
+        pool_ratings = {"random": 1000.0, "strong": 1500.0}
+        match_results = [
+            MatchResult(player_a="candidate", player_b="random", wins_a=2, wins_b=8, draws=0),
+            MatchResult(player_a="candidate", player_b="strong", wins_a=1, wins_b=9, draws=0),
+        ]
+        elo = compute_elo_against_pool("candidate", pool_ratings, match_results)
+        assert elo < 1000.0
+
+    def test_candidate_even_with_anchor(self):
+        """A candidate with 50/50 results against anchor should be near anchor rating."""
+        pool_ratings = {"random": 1000.0}
+        match_results = [
+            MatchResult(player_a="candidate", player_b="random", wins_a=10, wins_b=10, draws=0),
+        ]
+        elo = compute_elo_against_pool("candidate", pool_ratings, match_results)
+        assert abs(elo - 1000.0) < 50.0
+
+    def test_only_candidate_matchups_used(self):
+        """Only matchups involving the candidate should matter."""
+        pool_ratings = {"random": 1000.0, "other": 1200.0}
+        match_results = [
+            MatchResult(player_a="candidate", player_b="random", wins_a=7, wins_b=3, draws=0),
+            # This matchup doesn't involve candidate — should be ignored
+            MatchResult(player_a="random", player_b="other", wins_a=5, wins_b=5, draws=0),
+        ]
+        elo = compute_elo_against_pool("candidate", pool_ratings, match_results)
+        assert elo > 1000.0

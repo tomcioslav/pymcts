@@ -83,3 +83,65 @@ def compute_elo_ratings(
 
     ratings.sort(key=lambda r: r.rating, reverse=True)
     return ratings
+
+
+def compute_elo_against_pool(
+    candidate: str,
+    pool_ratings: dict[str, float],
+    match_results: list[MatchResult],
+) -> float:
+    """Compute Elo for a single candidate against a pool with frozen ratings.
+
+    Only matchups involving the candidate are used. Pool players' ratings
+    are treated as fixed constants — the candidate's rating is the one
+    that maximizes the likelihood of observed results.
+
+    Args:
+        candidate: Name of the candidate player.
+        pool_ratings: Mapping of pool player names to their frozen Elo ratings.
+        match_results: Match results (only those involving candidate are used).
+
+    Returns:
+        The candidate's computed Elo rating.
+    """
+    # Filter to only candidate matchups
+    candidate_matches = [
+        m for m in match_results
+        if m.player_a == candidate or m.player_b == candidate
+    ]
+
+    if not candidate_matches:
+        return 1000.0
+
+    def _negative_log_likelihood(candidate_rating: np.ndarray) -> float:
+        r_cand = candidate_rating[0]
+        nll = 0.0
+        for m in candidate_matches:
+            if m.player_a == candidate:
+                r_opp = pool_ratings[m.player_b]
+                wins_cand = m.wins_a
+                wins_opp = m.wins_b
+            else:
+                r_opp = pool_ratings[m.player_a]
+                wins_cand = m.wins_b
+                wins_opp = m.wins_a
+
+            exp_cand = 1.0 / (1.0 + 10.0 ** ((r_opp - r_cand) / 400.0))
+            exp_cand = np.clip(exp_cand, 1e-10, 1.0 - 1e-10)
+            exp_opp = 1.0 - exp_cand
+
+            if wins_cand > 0:
+                nll -= wins_cand * np.log(exp_cand)
+            if wins_opp > 0:
+                nll -= wins_opp * np.log(exp_opp)
+
+        return nll
+
+    x0 = np.array([1000.0])
+    result = minimize(
+        _negative_log_likelihood,
+        x0,
+        method="L-BFGS-B",
+        options={"maxiter": 1000, "ftol": 1e-12},
+    )
+    return float(result.x[0])
