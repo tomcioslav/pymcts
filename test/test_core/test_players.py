@@ -86,3 +86,37 @@ class TestBatchedArenaWithPlayers:
             verbose=False,
         )
         assert len(result) == 4
+
+
+class TestMCTSPlayerElo:
+    def test_elo_defaults_to_none(self):
+        net = DummyNet()
+        config = MCTSConfig(num_simulations=5)
+        player = MCTSPlayer(net, config)
+        assert player.elo is None
+
+    def test_elo_can_be_set(self):
+        net = DummyNet()
+        config = MCTSConfig(num_simulations=5)
+        player = MCTSPlayer(net, config)
+        player.elo = 1234.5
+        assert player.elo == 1234.5
+
+
+class TestMCTSPlayerSaveLoadElo:
+    def test_save_load_with_elo(self, tmp_path):
+        net = DummyNet()
+        config = MCTSConfig(num_simulations=5)
+        player = MCTSPlayer(net, config, name="test_player", elo=1150.0)
+        player.save(tmp_path / "player")
+        loaded = MCTSPlayer.load(tmp_path / "player")
+        assert loaded.elo == 1150.0
+        assert loaded.name == "test_player"
+
+    def test_save_load_without_elo(self, tmp_path):
+        net = DummyNet()
+        config = MCTSConfig(num_simulations=5)
+        player = MCTSPlayer(net, config, name="no_elo")
+        player.save(tmp_path / "player")
+        loaded = MCTSPlayer.load(tmp_path / "player")
+        assert loaded.elo is None

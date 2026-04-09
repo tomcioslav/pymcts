@@ -117,6 +117,10 @@ class DummyNet(BaseNeuralNet):
     def load_checkpoint(self, path: str) -> None:
         pass
 
+    @classmethod
+    def from_checkpoint(cls, path: str) -> "DummyNet":
+        return cls()
+
     def copy(self) -> "DummyNet":
         return copy.deepcopy(self)
 
