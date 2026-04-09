@@ -37,34 +37,38 @@ class BridgitGame(Board2DGame):
 
         self._n = config.size
         self._config = config
+        self._g = g
         self._board = self._make_empty_board(config.size, g)
         self._current_player = Player.HORIZONTAL
         self._winner: Player | None = None
         self._game_over = False
         self._move_count = 0
         self._moves_left_in_turn = 1
-        self._g = g
-
-        # Union-Find per player: g*g cells + 2 sentinels
         self._sentinel_start = g * g
         self._sentinel_end = g * g + 1
-        self._uf = {
+        self._uf = self._init_union_find(g)
+
+    def _init_union_find(self, g: int) -> dict:
+        """Create per-player Union-Find structures and connect boundary sentinels."""
+        uf = {
             Player.HORIZONTAL: UnionFind(g * g + 2),
             Player.VERTICAL: UnionFind(g * g + 2),
         }
+        self._connect_horizontal_sentinels(uf[Player.HORIZONTAL], g)
+        self._connect_vertical_sentinels(uf[Player.VERTICAL], g)
+        return uf
 
-        # Connect boundary cells to sentinels
-        # HORIZONTAL: left (col 0) and right (col 2n) at odd rows
-        uf_h = self._uf[Player.HORIZONTAL]
+    def _connect_horizontal_sentinels(self, uf: UnionFind, g: int) -> None:
+        """Connect left (col 0) and right (col 2n) boundary cells to sentinels."""
         for r in range(1, g, 2):
-            uf_h.union(r * g + 0, self._sentinel_start)
-            uf_h.union(r * g + (g - 1), self._sentinel_end)
+            uf.union(r * g + 0, self._sentinel_start)
+            uf.union(r * g + (g - 1), self._sentinel_end)
 
-        # VERTICAL: top (row 0) and bottom (row 2n) at odd columns
-        uf_v = self._uf[Player.VERTICAL]
+    def _connect_vertical_sentinels(self, uf: UnionFind, g: int) -> None:
+        """Connect top (row 0) and bottom (row 2n) boundary cells to sentinels."""
         for c in range(1, g, 2):
-            uf_v.union(0 * g + c, self._sentinel_start)
-            uf_v.union((g - 1) * g + c, self._sentinel_end)
+            uf.union(0 * g + c, self._sentinel_start)
+            uf.union((g - 1) * g + c, self._sentinel_end)
 
     @staticmethod
     def _make_empty_board(n: int, g: int) -> np.ndarray:
@@ -155,44 +159,59 @@ class BridgitGame(Board2DGame):
         if self._game_over:
             raise ValueError("Game is already over")
 
-        # Convert canonical action to (row, col) in canonical space
-        row, col = self.action_to_row_col(action)
-
-        # If current player is VERTICAL, un-transpose to get actual board coords
-        if self._current_player == Player.VERTICAL:
-            row, col = col, row
-
+        row, col = self._canonical_to_absolute(action)
         player = self._current_player
-        g = self._g
 
         if not self._is_crossing(row, col):
             raise ValueError(f"Position ({row}, {col}) is not a playable crossing")
         if self._board[row, col] != 0:
             raise ValueError(f"Crossing ({row}, {col}) is already claimed")
 
-        # Place bridge and stamp endpoints
+        self._place_bridge(row, col, player)
+        self._move_count += 1
+        self._moves_left_in_turn -= 1
+        self._update_union_find(row, col, player)
+        self._check_win_or_switch(player)
+
+    def _canonical_to_absolute(self, action: int) -> tuple[int, int]:
+        """Convert flat canonical action index to absolute board (row, col)."""
+        row, col = self.action_to_row_col(action)
+        if self._current_player == Player.VERTICAL:
+            row, col = col, row
+        return row, col
+
+    def _place_bridge(self, row: int, col: int, player: Player) -> None:
+        """Stamp the bridge cell and both its endpoints onto the board."""
         self._board[row, col] = player.value
         for er, ec in self._endpoints(row, col, player):
             self._board[er, ec] = player.value
 
-        self._move_count += 1
-        self._moves_left_in_turn -= 1
-
-        # Update Union-Find
+    def _update_union_find(self, row: int, col: int, player: Player) -> None:
+        """Connect the new bridge and its endpoints in Union-Find."""
         uf = self._uf[player]
         bridge_idx = self._cell_idx(row, col)
-        for er, ec in self._endpoints(row, col, player):
+        endpoints = self._endpoints(row, col, player)
+
+        for er, ec in endpoints:
             uf.union(bridge_idx, self._cell_idx(er, ec))
 
-        # Union endpoints with adjacent same-player cells
-        for er, ec in self._endpoints(row, col, player):
+        self._connect_endpoints_to_neighbors(uf, endpoints, player)
+
+    def _connect_endpoints_to_neighbors(
+        self, uf: UnionFind, endpoints: list[tuple[int, int]], player: Player
+    ) -> None:
+        """Union each endpoint with adjacent same-player cells."""
+        g = self._g
+        for er, ec in endpoints:
             for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 nr, nc = er + dr, ec + dc
                 if (0 <= nr < g and 0 <= nc < g
                         and self._board[nr, nc] == player.value):
                     uf.union(self._cell_idx(er, ec), self._cell_idx(nr, nc))
 
-        # Check win
+    def _check_win_or_switch(self, player: Player) -> None:
+        """Declare winner if sentinels connected, else switch player when turn ends."""
+        uf = self._uf[player]
         if uf.connected(self._sentinel_start, self._sentinel_end):
             self._winner = player
             self._game_over = True
@@ -204,10 +223,14 @@ class BridgitGame(Board2DGame):
 
     def copy(self) -> "BridgitGame":
         new = BridgitGame.__new__(BridgitGame)
-        # Board2DGame init
         new._board_rows = self._board_rows
         new._board_cols = self._board_cols
-        # BridgitGame state
+        self._copy_scalar_state(new)
+        new._uf = self._copy_union_find()
+        return new
+
+    def _copy_scalar_state(self, new: "BridgitGame") -> None:
+        """Copy all scalar and array fields onto a freshly allocated game instance."""
         new._n = self._n
         new._config = self._config
         new._board = self._board.copy()
@@ -219,11 +242,13 @@ class BridgitGame(Board2DGame):
         new._g = self._g
         new._sentinel_start = self._sentinel_start
         new._sentinel_end = self._sentinel_end
-        new._uf = {
+
+    def _copy_union_find(self) -> dict:
+        """Return a deep copy of the per-player Union-Find structures."""
+        return {
             Player.HORIZONTAL: self._uf[Player.HORIZONTAL].copy(),
             Player.VERTICAL: self._uf[Player.VERTICAL].copy(),
         }
-        return new
 
     def get_result(self, player: int) -> float | None:
         if not self._game_over:
