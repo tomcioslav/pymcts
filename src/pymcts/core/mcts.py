@@ -48,53 +48,63 @@ class MCTSNode:
         """True when all moves have been turned into child nodes."""
         return self.is_expanded and not self.unexpanded_moves
 
+    def _ucb_score(self, child: "MCTSNode", c_puct: float, sqrt_parent: float) -> float:
+        """Compute UCB score for an existing child node."""
+        vc = child.visit_count
+        if vc == 0:
+            q = 0.0
+        else:
+            q = child.value_sum / vc
+            if child.game.current_player != self.game.current_player:
+                q = -q
+        return q + c_puct * child.prior * sqrt_parent / (1 + vc)
+
+    def _best_existing_child(self, c_puct: float, sqrt_parent: float) -> tuple["MCTSNode | None", float]:
+        """Return the best existing child and its UCB score."""
+        best_score = -math.inf
+        best_child = None
+        for child in self.children.values():
+            score = self._ucb_score(child, c_puct, sqrt_parent)
+            if score > best_score:
+                best_score = score
+                best_child = child
+        return best_child, best_score
+
+    def _best_unexpanded_move(self, c_puct: float, sqrt_parent: float) -> tuple[int, float, float]:
+        """Return the best unexpanded action, its prior, and its UCB score."""
+        explore_base = c_puct * sqrt_parent
+        best_score = -math.inf
+        best_action = -1
+        best_prior = 0.0
+        for action, prior in self.unexpanded_moves.items():
+            score = explore_base * prior
+            if score > best_score:
+                best_score = score
+                best_action = action
+                best_prior = prior
+        return best_action, best_prior, best_score
+
+    def _expand_move(self, action: int, prior: float) -> "MCTSNode":
+        """Create a child node for the given unexpanded action."""
+        child_game = self.game.copy()
+        child_game.make_action(action)
+        child = MCTSNode(child_game, parent=self, prior=prior)
+        self.children[action] = child
+        del self.unexpanded_moves[action]
+        return child
+
     def best_child_or_expand(self, c_puct: float) -> "MCTSNode":
         """Select the best child, possibly creating one from unexpanded moves.
 
         Compares UCB scores of existing children with potential scores of
         unexpanded moves. If an unexpanded move wins, creates the child node.
         """
-        best_score = -math.inf
-        best_child = None
-        best_unexpanded_action = -1
-        best_unexpanded_prior = 0.0
+        sqrt_parent = math.sqrt(self.visit_count)
+        best_child, best_child_score = self._best_existing_child(c_puct, sqrt_parent)
+        best_action, best_prior, best_unexpanded_score = self._best_unexpanded_move(c_puct, sqrt_parent)
 
-        parent_visits = self.visit_count
-        sqrt_parent = math.sqrt(parent_visits)
-        my_player = self.game.current_player
-
-        # Score existing children — inline UCB calculation
-        for child in self.children.values():
-            vc = child.visit_count
-            if vc == 0:
-                q = 0.0
-            else:
-                q = child.value_sum / vc
-                if child.game.current_player != my_player:
-                    q = -q
-            score = q + c_puct * child.prior * sqrt_parent / (1 + vc)
-            if score > best_score:
-                best_score = score
-                best_child = child
-                best_unexpanded_action = -1
-
-        # Score unexpanded moves (visit_count=0, q=0)
-        explore_base = c_puct * sqrt_parent
-        for action, prior in self.unexpanded_moves.items():
-            score = explore_base * prior
-            if score > best_score:
-                best_score = score
-                best_child = None
-                best_unexpanded_action = action
-                best_unexpanded_prior = prior
-
-        if best_unexpanded_action >= 0:
-            child_game = self.game.copy()
-            child_game.make_action(best_unexpanded_action)
-            child = MCTSNode(child_game, parent=self, prior=best_unexpanded_prior)
-            self.children[best_unexpanded_action] = child
-            del self.unexpanded_moves[best_unexpanded_action]
-            return child
+        if best_action >= 0 and best_unexpanded_score > best_child_score:
+            return self._expand_move(best_action, best_prior)
 
         return best_child
 
@@ -224,60 +234,73 @@ class MCTS:
         """Run MCTS for a single game. Returns the root node."""
         return self.search_batch([game])[0]
 
-    def search_batch(self, games: list[BaseGame]) -> list[MCTSNode]:
-        """Run MCTS for one or more games with batched inference.
+    # Alias used by tests
+    _search = search
 
-        Uses virtual loss when num_parallel_leaves > 1.
-        """
-        n = len(games)
-        k = self.mcts_config.num_parallel_leaves
-        roots = [MCTSNode(g.copy()) for g in games]
-
-        # Initial expansion — batch all roots
+    def _expand_roots(self, roots: list[MCTSNode]) -> None:
+        """Run initial neural net expansion and add Dirichlet noise to all roots."""
         predictions = self._predict_batch([r.game.get_state() for r in roots])
-        for i in range(n):
-            policy, value = predictions[i]
-            self._set_priors(roots[i], policy, value)
+        for root, (policy, value) in zip(roots, predictions):
+            self._set_priors(root, policy, value)
             self._add_dirichlet_noise(
-                roots[i],
+                root,
                 self.mcts_config.dirichlet_alpha,
                 self.mcts_config.dirichlet_epsilon,
             )
 
+    def _process_leaf(
+        self,
+        leaf: MCTSNode,
+        pending_leaves: list[MCTSNode],
+        pending_states: list,
+    ) -> None:
+        """Route a leaf to immediate backpropagation or the pending prediction batch."""
+        if leaf.game.is_over:
+            self._backpropagate(leaf, 1.0)
+        elif leaf.is_expanded and not leaf.has_candidates:
+            self._backpropagate(leaf, leaf.q_value if leaf.visit_count > 0 else 0.0)
+        else:
+            self._apply_virtual_loss(leaf)
+            pending_leaves.append(leaf)
+            pending_states.append(leaf.game.get_state())
+
+    def _collect_leaves(
+        self, roots: list[MCTSNode], chunk: int, c_puct: float
+    ) -> tuple[list[MCTSNode], list]:
+        """Select `chunk` leaves per root and return those needing net evaluation."""
+        pending_leaves: list[MCTSNode] = []
+        pending_states: list = []
+        for root in roots:
+            for _ in range(chunk):
+                leaf = self._select_leaf(root, c_puct)
+                self._process_leaf(leaf, pending_leaves, pending_states)
+        return pending_leaves, pending_states
+
+    def _evaluate_and_backprop_leaves(
+        self, leaves: list[MCTSNode], states: list
+    ) -> None:
+        """Run net on pending states, then undo virtual loss and backpropagate."""
+        predictions = self._predict_batch(states)
+        for leaf, (policy, value) in zip(leaves, predictions):
+            self._undo_virtual_loss(leaf)
+            value = self._set_priors(leaf, policy, value)
+            self._backpropagate(leaf, value)
+
+    def search_batch(self, games: list[BaseGame]) -> list[MCTSNode]:
+        """Run MCTS for one or more games with batched inference (virtual loss when k>1)."""
+        roots = [MCTSNode(g.copy()) for g in games]
+        self._expand_roots(roots)
+
         c_puct = self.mcts_config.c_puct
         num_sims = self.mcts_config.num_simulations
+        k = self.mcts_config.num_parallel_leaves
         sim = 0
 
         while sim < num_sims:
             chunk = min(k, num_sims - sim)
-
-            to_predict_leaves: list[MCTSNode] = []
-            to_predict_states: list = []
-
-            for i in range(n):
-                for _ in range(chunk):
-                    leaf = self._select_leaf(roots[i], c_puct)
-
-                    if leaf.game.is_over:
-                        self._backpropagate(leaf, 1.0)
-                    elif leaf.is_expanded and not leaf.has_candidates:
-                        self._backpropagate(
-                            leaf, leaf.q_value if leaf.visit_count > 0 else 0.0,
-                        )
-                    else:
-                        self._apply_virtual_loss(leaf)
-                        to_predict_leaves.append(leaf)
-                        to_predict_states.append(leaf.game.get_state())
-
-            if to_predict_states:
-                predictions = self._predict_batch(to_predict_states)
-
-                for j, leaf in enumerate(to_predict_leaves):
-                    policy, value = predictions[j]
-                    self._undo_virtual_loss(leaf)
-                    value = self._set_priors(leaf, policy, value)
-                    self._backpropagate(leaf, value)
-
+            leaves, states = self._collect_leaves(roots, chunk, c_puct)
+            if states:
+                self._evaluate_and_backprop_leaves(leaves, states)
             sim += chunk
 
         return roots
