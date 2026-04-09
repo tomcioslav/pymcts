@@ -10,7 +10,7 @@ from typing import Callable
 from pymcts.core.arena import batched_arena
 from pymcts.core.base_game import BaseGame
 from pymcts.core.base_neural_net import BaseNeuralNet
-from pymcts.core.config import ArenaConfig, MCTSConfig, PathsConfig, TrainingConfig
+from pymcts.core.config import ArenaConfig, EloArenaConfig, MCTSConfig, PathsConfig, TrainingConfig
 from pymcts.core.data import Example, examples_from_records
 from pymcts.core.players import GreedyMCTSPlayer, RandomPlayer
 from pymcts.elo.config import EloRating, MatchResult, TournamentResult
@@ -40,7 +40,7 @@ def train(
     net: BaseNeuralNet,
     mcts_config: MCTSConfig,
     training_config: TrainingConfig,
-    arena_config: ArenaConfig,
+    arena: ArenaConfig | EloArenaConfig,
     paths_config: PathsConfig | None = None,
     game_type: str = "unknown",
     game_config: dict | None = None,
@@ -53,7 +53,7 @@ def train(
         net: Neural network to train.
         mcts_config: MCTS configuration.
         training_config: Training loop configuration.
-        arena_config: Arena evaluation configuration.
+        arena: Arena evaluation configuration (ArenaConfig or EloArenaConfig).
         paths_config: File system paths. If None, uses defaults.
         game_type: Game type string for records.
         game_config: Game config dict for records.
@@ -64,11 +64,17 @@ def train(
 
     run_dir = _create_run_dir(paths)
 
+    arena_dir = run_dir / "arena"
+    arena_dir.mkdir(parents=True, exist_ok=True)
+
     # Save run config so models can be loaded later
+    net_class = type(net)
     run_config = {
+        "net_class": f"{net_class.__module__}.{net_class.__qualname__}",
         "mcts_config": mcts_config.model_dump(),
         "training_config": training_config.model_dump(),
-        "arena_config": arena_config.model_dump(),
+        "arena": arena.model_dump(),
+        "arena_type": type(arena).__name__,
         "game_type": game_type,
         "game_config": game_config,
     }
@@ -155,159 +161,197 @@ def train(
         net.save_checkpoint(post_checkpoint)
 
         # 3. Evaluate — new model vs previous
-        if verbose:
-            print("\n[3/3] Arena evaluation...")
-            print("  vs previous model:")
-
-        new_player = GreedyMCTSPlayer(net, mcts_config, name="new")
-
-        prev_net = net.copy()
-        prev_net.load_checkpoint(pre_checkpoint)
-        prev_player = GreedyMCTSPlayer(prev_net, mcts_config, name="prev")
-
-        eval_records = batched_arena(
-            player_a=new_player,
-            player_b=prev_player,
-            game_factory=game_factory,
-            num_games=arena_config.num_games,
-            batch_size=arena_config.num_games,
-            swap_players=arena_config.swap_players,
-            game_type=game_type,
-            verbose=verbose,
-        )
-
-        result = eval_records.evaluate("new")
-        accepted = eval_records.is_better("new", arena_config.threshold)
-
-        if verbose:
-            print(f"  New: {result.wins} wins | Prev: {result.losses} wins | "
-                  f"Win rate: {result.win_rate:.1%}")
-
-        # Evaluate vs past best models
-        historical_results = {}
-        if best_checkpoints:
+        if isinstance(arena, ArenaConfig):
             if verbose:
-                print(f"\n  vs past best models ({len(best_checkpoints)}):")
-            for past_iter, past_path in best_checkpoints:
-                past_net = net.copy()
-                past_net.load_checkpoint(past_path)
-                past_player = GreedyMCTSPlayer(past_net, mcts_config, name=f"iter_{past_iter:03d}")
+                print("\n[3/3] Arena evaluation...")
+                print("  vs previous model:")
 
-                past_records = batched_arena(
-                    player_a=new_player,
-                    player_b=past_player,
-                    game_factory=game_factory,
-                    num_games=arena_config.num_games,
-                    batch_size=arena_config.num_games,
-                    swap_players=arena_config.swap_players,
-                    game_type=game_type,
-                    verbose=verbose,
-                )
+            new_player = GreedyMCTSPlayer(net, mcts_config, name="new")
 
-                past_result = past_records.evaluate("new")
-                historical_results[past_iter] = {
-                    "wins": past_result.wins,
-                    "losses": past_result.losses,
-                    "win_rate": past_result.win_rate,
-                }
+            prev_net = net.copy()
+            prev_net.load_checkpoint(pre_checkpoint)
+            prev_player = GreedyMCTSPlayer(prev_net, mcts_config, name="prev")
+
+            eval_records = batched_arena(
+                player_a=new_player,
+                player_b=prev_player,
+                game_factory=game_factory,
+                num_games=arena.num_games,
+                batch_size=arena.num_games,
+                swap_players=arena.swap_players,
+                game_type=game_type,
+                verbose=verbose,
+            )
+
+            result = eval_records.evaluate("new")
+            accepted = eval_records.is_better("new", arena.threshold)
+
+            if verbose:
+                print(f"  New: {result.wins} wins | Prev: {result.losses} wins | "
+                      f"Win rate: {result.win_rate:.1%}")
+
+            # Evaluate vs past best models
+            historical_results = {}
+            historical_game_records = {}
+            if best_checkpoints:
                 if verbose:
-                    print(f"    vs iter {past_iter:03d}: "
-                          f"{past_result.wins}W/{past_result.losses}L "
-                          f"({past_result.win_rate:.0%})")
+                    print(f"\n  vs past best models ({len(best_checkpoints)}):")
+                for past_iter, past_path in best_checkpoints:
+                    past_net = net.copy()
+                    past_net.load_checkpoint(past_path)
+                    past_player = GreedyMCTSPlayer(past_net, mcts_config, name=f"iter_{past_iter:03d}")
 
-        if accepted:
-            if verbose:
-                print("\n  -> ACCEPTED: new model is better")
-            best_checkpoints.append((iteration, post_checkpoint))
-        else:
-            if verbose:
-                print("\n  -> REJECTED: reverting to pre-training weights")
-            net.load_checkpoint(pre_checkpoint)
+                    past_records = batched_arena(
+                        player_a=new_player,
+                        player_b=past_player,
+                        game_factory=game_factory,
+                        num_games=arena.num_games,
+                        batch_size=arena.num_games,
+                        swap_players=arena.swap_players,
+                        game_type=game_type,
+                        verbose=verbose,
+                    )
 
-        # Save eval games
-        eval_path = iter_dir / "eval_games.json"
-        eval_path.write_text(eval_records.model_dump_json(indent=2))
+                    past_result = past_records.evaluate("new")
+                    historical_results[past_iter] = {
+                        "wins": past_result.wins,
+                        "losses": past_result.losses,
+                        "win_rate": past_result.win_rate,
+                    }
+                    historical_game_records[past_iter] = past_records
+                    if verbose:
+                        print(f"    vs iter {past_iter:03d}: "
+                              f"{past_result.wins}W/{past_result.losses}L "
+                              f"({past_result.win_rate:.0%})")
 
-        # Save iteration data
-        iteration_data = {
-            "iteration": iteration,
-            "training": {
-                "num_examples": len(all_examples),
-                "metrics": train_metrics,
-            },
-            "arena": {
-                "new_wins": result.wins,
-                "prev_wins": result.losses,
-                "total_games": result.total,
-                "win_rate": result.win_rate,
-                "accepted": accepted,
-            },
-            "historical_arena": historical_results,
-        }
-        iter_data_path = iter_dir / "iteration_data.json"
-        iter_data_path.write_text(json.dumps(iteration_data, indent=2))
+            if accepted:
+                if verbose:
+                    print("\n  -> ACCEPTED: new model is better")
+                best_checkpoints.append((iteration, post_checkpoint))
+                # Save accepted player to arena/
+                accepted_player = GreedyMCTSPlayer(net, mcts_config, name=f"iteration_{iteration:03d}")
+                accepted_player.save(arena_dir / f"iteration_{iteration:03d}")
+            else:
+                if verbose:
+                    print("\n  -> REJECTED: reverting to pre-training weights")
+                net.load_checkpoint(pre_checkpoint)
 
-        # Elo tracking
-        if training_config.elo_tracking:
-            if verbose:
-                print("  Elo evaluation...")
+            # Save eval games
+            eval_path = iter_dir / "eval_games.json"
+            eval_path.write_text(eval_records.model_dump_json(indent=2))
 
-            current_player = GreedyMCTSPlayer(net, mcts_config, name=f"iter_{iteration:03d}")
+            # Save arena results summary
+            arena_results = {
+                "vs_previous": {
+                    "wins": result.wins,
+                    "losses": result.losses,
+                    "draws": result.draws,
+                    "total": result.total,
+                    "win_rate": result.win_rate,
+                    "avg_moves_in_wins": result.avg_moves_in_wins,
+                    "avg_moves_in_losses": result.avg_moves_in_losses,
+                    "accepted": accepted,
+                },
+                "vs_historical": {
+                    f"iter_{past_iter:03d}": {
+                        "wins": hist["wins"],
+                        "losses": hist["losses"],
+                        "win_rate": hist["win_rate"],
+                    }
+                    for past_iter, hist in historical_results.items()
+                },
+            }
+            arena_results_path = iter_dir / "arena_results.json"
+            arena_results_path.write_text(json.dumps(arena_results, indent=2))
 
-            for ref_name, ref_player in elo_reference_pool:
-                ref_records = batched_arena(
-                    player_a=current_player,
-                    player_b=ref_player,
-                    game_factory=game_factory,
-                    num_games=training_config.elo_games_per_matchup,
-                    batch_size=training_config.elo_games_per_matchup,
-                    swap_players=True,
-                    game_type="elo",
-                    verbose=verbose,
-                )
-                scores = ref_records.scores
-                wins_a = scores.get(current_player.name, 0)
-                wins_b = scores.get(ref_name, 0)
-                draws = len(ref_records) - wins_a - wins_b
+            # Save historical arena game records
+            for past_iter, past_records in historical_game_records.items():
+                hist_path = iter_dir / f"eval_games_vs_iter_{past_iter:03d}.json"
+                hist_path.write_text(past_records.model_dump_json(indent=2))
 
-                elo_match_results.append(MatchResult(
-                    player_a=current_player.name,
-                    player_b=ref_name,
-                    wins_a=wins_a,
-                    wins_b=wins_b,
-                    draws=draws,
-                ))
-
-            elo_ratings = compute_elo_ratings(elo_match_results, anchor_player="random")
-            current_elo = next(
-                (r.rating for r in elo_ratings if r.name == current_player.name),
-                1000.0,
-            )
-
-            if verbose:
-                print(f"  Elo: {current_elo:.0f}")
-
-            # Add to reference pool at interval
-            if iteration % training_config.elo_reference_interval == 0:
-                ref_net = net.copy()
-                ref_player_new = GreedyMCTSPlayer(ref_net, mcts_config, name=f"ref_iter_{iteration:03d}")
-                elo_reference_pool.append((ref_player_new.name, ref_player_new))
-
-            # Save Elo results
-            elo_result = TournamentResult(
-                ratings=elo_ratings,
-                match_results=elo_match_results,
-                anchor_player="random",
-                anchor_rating=1000.0,
-                timestamp=datetime.now().isoformat(),
-                metadata={"training_run": str(run_dir), "iteration": iteration},
-            )
-            elo_path = run_dir / "elo_results.json"
-            elo_path.write_text(elo_result.model_dump_json(indent=2))
-
-            # Add elo to iteration data
-            iteration_data["elo"] = current_elo
+            # Save iteration data
+            iteration_data = {
+                "iteration": iteration,
+                "training": {
+                    "num_examples": len(all_examples),
+                    "metrics": train_metrics,
+                },
+                "arena": {
+                    "new_wins": result.wins,
+                    "prev_wins": result.losses,
+                    "total_games": result.total,
+                    "win_rate": result.win_rate,
+                    "accepted": accepted,
+                },
+                "historical_arena": historical_results,
+            }
+            iter_data_path = iter_dir / "iteration_data.json"
             iter_data_path.write_text(json.dumps(iteration_data, indent=2))
+
+            # Elo tracking
+            if training_config.elo_tracking:
+                if verbose:
+                    print("  Elo evaluation...")
+
+                current_player = GreedyMCTSPlayer(net, mcts_config, name=f"iter_{iteration:03d}")
+
+                for ref_name, ref_player in elo_reference_pool:
+                    ref_records = batched_arena(
+                        player_a=current_player,
+                        player_b=ref_player,
+                        game_factory=game_factory,
+                        num_games=training_config.elo_games_per_matchup,
+                        batch_size=training_config.elo_games_per_matchup,
+                        swap_players=True,
+                        game_type="elo",
+                        verbose=verbose,
+                    )
+                    scores = ref_records.scores
+                    wins_a = scores.get(current_player.name, 0)
+                    wins_b = scores.get(ref_name, 0)
+                    draws = len(ref_records) - wins_a - wins_b
+
+                    elo_match_results.append(MatchResult(
+                        player_a=current_player.name,
+                        player_b=ref_name,
+                        wins_a=wins_a,
+                        wins_b=wins_b,
+                        draws=draws,
+                    ))
+
+                elo_ratings = compute_elo_ratings(elo_match_results, anchor_player="random")
+                current_elo = next(
+                    (r.rating for r in elo_ratings if r.name == current_player.name),
+                    1000.0,
+                )
+
+                if verbose:
+                    print(f"  Elo: {current_elo:.0f}")
+
+                # Add to reference pool at interval
+                if iteration % training_config.elo_reference_interval == 0:
+                    ref_net = net.copy()
+                    ref_player_new = GreedyMCTSPlayer(ref_net, mcts_config, name=f"ref_iter_{iteration:03d}")
+                    elo_reference_pool.append((ref_player_new.name, ref_player_new))
+
+                # Save Elo results
+                elo_result = TournamentResult(
+                    ratings=elo_ratings,
+                    match_results=elo_match_results,
+                    anchor_player="random",
+                    anchor_rating=1000.0,
+                    timestamp=datetime.now().isoformat(),
+                    metadata={"training_run": str(run_dir), "iteration": iteration},
+                )
+                elo_path = run_dir / "elo_results.json"
+                elo_path.write_text(elo_result.model_dump_json(indent=2))
+
+                # Add elo to iteration data
+                iteration_data["elo"] = current_elo
+                iter_data_path.write_text(json.dumps(iteration_data, indent=2))
+
+        elif isinstance(arena, EloArenaConfig):
+            pass  # Implemented in Task 7
 
         if verbose:
             print()

@@ -104,11 +104,12 @@ class DummyNet(BaseNeuralNet):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         batch = x.shape[0]
-        log_policy = torch.full((batch, self.action_size), -float("inf"))
-        # Uniform over all actions (will be masked later anyway)
+        device = x.device
         uniform = torch.log(torch.tensor(1.0 / self.action_size))
-        log_policy = torch.full((batch, self.action_size), uniform.item())
-        value = torch.zeros(batch, 1)
+        # Use _dummy so gradients can flow through the computation graph
+        bias = self._dummy.bias[0] * 0.0
+        log_policy = torch.full((batch, self.action_size), uniform.item(), device=device) + bias
+        value = torch.zeros(batch, 1, device=device) + bias
         return log_policy, value
 
     def save_checkpoint(self, path: str) -> None:
