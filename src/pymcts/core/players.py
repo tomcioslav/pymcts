@@ -25,6 +25,7 @@ class BasePlayer(ABC):
     def __init__(self, name: str | None = None):
         self.name = name or self.__class__.__name__
         self._last_policy: torch.Tensor | None = None
+        self.elo: float | None = None
 
     @abstractmethod
     def get_action(self, game: BaseGame) -> int: ...
@@ -41,6 +42,26 @@ class RandomPlayer(BasePlayer):
     def get_action(self, game: BaseGame) -> int:
         self._last_policy = None
         return random.choice(game.valid_actions())
+
+    def save(self, path: str | Path) -> None:
+        """Save player to a directory (config only, no model)."""
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        config = {
+            "type": "random",
+            "name": self.name,
+            "elo": self.elo,
+        }
+        (path / "player.json").write_text(json.dumps(config, indent=2))
+
+    @classmethod
+    def load(cls, path: str | Path) -> "RandomPlayer":
+        """Load a RandomPlayer from a directory saved with .save()."""
+        path = Path(path)
+        config = json.loads((path / "player.json").read_text())
+        player = cls(name=config["name"])
+        player.elo = config.get("elo")
+        return player
 
 
 class MCTSPlayer(BasePlayer):

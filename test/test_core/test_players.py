@@ -120,3 +120,30 @@ class TestMCTSPlayerSaveLoadElo:
         player.save(tmp_path / "player")
         loaded = MCTSPlayer.load(tmp_path / "player")
         assert loaded.elo is None
+
+
+class TestRandomPlayerSaveLoad:
+    def test_save_creates_player_json(self, tmp_path):
+        player = RandomPlayer(name="random")
+        player.elo = 1000.0
+        player.save(tmp_path / "random")
+        assert (tmp_path / "random" / "player.json").exists()
+        assert not (tmp_path / "random" / "model.pt").exists()
+
+    def test_load_roundtrip(self, tmp_path):
+        player = RandomPlayer(name="random")
+        player.elo = 1000.0
+        player.save(tmp_path / "random")
+        loaded = RandomPlayer.load(tmp_path / "random")
+        assert loaded.name == "random"
+        assert loaded.elo == 1000.0
+
+    def test_load_returns_random_player(self, tmp_path):
+        player = RandomPlayer(name="rng")
+        player.elo = 950.0
+        player.save(tmp_path / "rng")
+        loaded = RandomPlayer.load(tmp_path / "rng")
+        assert isinstance(loaded, RandomPlayer)
+        game = TicTacToe()
+        action = loaded.get_action(game)
+        assert action in game.valid_actions()
