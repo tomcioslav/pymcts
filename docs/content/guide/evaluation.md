@@ -4,31 +4,52 @@ This guide covers how to compare models, run arena matches, and analyze game rec
 
 ## Arena
 
-The `Arena` pits two players against each other over multiple games.
+The `batched_arena` function pits two players against each other over multiple games.
 
 ```python
-from pymcts.core.arena import Arena
-from pymcts.core.players import MCTSPlayer, RandomPlayer
+from pymcts.core.arena import batched_arena
+from pymcts.core.players import GreedyMCTSPlayer, RandomPlayer
 from pymcts.core.config import MCTSConfig
 
 # Load two models
-net_v1 = MyNet()
-net_v1.load_checkpoint("trainings/.../iteration_005/post_training.pt")
-
-net_v2 = MyNet()
-net_v2.load_checkpoint("trainings/.../iteration_010/post_training.pt")
+net_v1 = MyNet.from_checkpoint("trainings/.../iteration_005/post_training.pt")
+net_v2 = MyNet.from_checkpoint("trainings/.../iteration_010/post_training.pt")
 
 # Create players
-player_v1 = MCTSPlayer(net=net_v1, mcts_config=MCTSConfig(num_simulations=200), name="v1")
-player_v2 = MCTSPlayer(net=net_v2, mcts_config=MCTSConfig(num_simulations=200), name="v2")
+config = MCTSConfig(num_simulations=200)
+player_v1 = GreedyMCTSPlayer(net=net_v1, mcts_config=config, name="v1")
+player_v2 = GreedyMCTSPlayer(net=net_v2, mcts_config=config, name="v2")
 
 # Run arena
-arena = Arena(player_v1, player_v2, game_factory=lambda: MyGame())
-collection = arena.play_games(num_games=40, verbose=True, swap_players=True)
+collection = batched_arena(
+    player_a=player_v1,
+    player_b=player_v2,
+    game_factory=lambda: MyGame(),
+    num_games=40,
+    swap_players=True,
+)
 print(collection.scores)
 ```
 
 Setting `swap_players=True` ensures each model plays both sides — this eliminates first-player advantage.
+
+## Loading players from training
+
+The easiest way to load a trained model is from the `arena/` directory:
+
+```python
+from pymcts.core.players import MCTSPlayer
+
+# Load a player saved during training
+player = MCTSPlayer.load("trainings/run_.../arena/iteration_010")
+print(f"Player: {player.name}, Elo: {player.elo}")
+```
+
+Or load from a training iteration directly:
+
+```python
+player = MCTSPlayer.from_training_iteration("trainings/run_.../iteration_010")
+```
 
 ## Players
 
@@ -66,12 +87,27 @@ from pymcts.core.players import GreedyMCTSPlayer
 player = GreedyMCTSPlayer(net=net, mcts_config=config, name="greedy")
 ```
 
-## Game records
+### Player serialization
 
-Every game played through the Arena or self-play is recorded as a `GameRecord`:
+All players can be saved and loaded:
 
 ```python
-record = arena.play_game(verbose=True)
+# Save
+player.save("my_player/")
+
+# Load
+loaded = MCTSPlayer.load("my_player/")
+print(loaded.elo)  # Elo is preserved if set
+```
+
+`RandomPlayer` also supports save/load (no model weights, just config).
+
+## Game records
+
+Every game played through `batched_arena` or self-play is recorded as a `GameRecord`:
+
+```python
+record = collection[0]
 print(record.summary())
 print(f"Winner: {record.winner_name()}")
 print(f"Moves: {record.num_moves}")
@@ -82,8 +118,6 @@ print(f"Moves: {record.num_moves}")
 Multiple records are grouped in a `GameRecordCollection`:
 
 ```python
-collection = arena.play_games(num_games=20)
-
 # Win/loss counts
 print(collection.scores)  # {"v1": 12, "v2": 8}
 

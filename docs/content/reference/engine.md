@@ -18,7 +18,7 @@ The game-agnostic engine that powers MCTS, self-play, training, and evaluation.
 
 ## Arena
 
-::: pymcts.core.arena.Arena
+::: pymcts.core.arena.batched_arena
 
 ## Players
 

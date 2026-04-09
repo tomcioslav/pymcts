@@ -19,7 +19,7 @@ train(
     net=net,
     mcts_config=MCTSConfig(num_simulations=50),
     training_config=TrainingConfig(num_iterations=3, num_self_play_games=10),
-    arena_config=ArenaConfig(num_games=10),
+    arena=ArenaConfig(num_games=10),
     game_type="bridgit",
     game_config=board_config.model_dump(),
 )
@@ -40,22 +40,25 @@ Checkpoints are saved to `trainings/` automatically.
 After training, pit two models against each other:
 
 ```python
-from pymcts.core.arena import Arena
-from pymcts.core.players import MCTSPlayer
+from pymcts.core.arena import batched_arena
+from pymcts.core.players import GreedyMCTSPlayer
 from pymcts.core.config import MCTSConfig
 from pymcts.games.bridgit.game import BridgitGame
 from pymcts.games.bridgit.config import BoardConfig
 from pymcts.games.bridgit.neural_net import BridgitNet
 
 board_config = BoardConfig(size=5)
-net = BridgitNet(board_config)
-net.load_checkpoint("trainings/run_.../iteration_.../post_training.pt")
+net = BridgitNet.from_checkpoint("trainings/run_.../iteration_.../post_training.pt")
 
-player = MCTSPlayer(net=net, mcts_config=MCTSConfig(num_simulations=200), name="trained")
-arena = Arena(player, player, game_factory=lambda: BridgitGame(board_config))
-
-record = arena.play_game(verbose=True)
-print(record.summary())
+player = GreedyMCTSPlayer(net=net, mcts_config=MCTSConfig(num_simulations=200), name="trained")
+records = batched_arena(
+    player_a=player,
+    player_b=player,
+    game_factory=lambda: BridgitGame(board_config),
+    num_games=1,
+    verbose=True,
+)
+print(records[0].summary())
 ```
 
 ## Play interactively (GUI)

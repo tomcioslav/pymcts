@@ -12,13 +12,15 @@ train(
     net=my_net,                          # neural network to train
     mcts_config=mcts_config,             # MCTS settings
     training_config=training_config,     # training loop settings
-    arena_config=arena_config,           # model comparison settings
+    arena=arena_config,                  # model comparison settings
     game_type="mygame",                  # label for saved records
     game_config=my_config.model_dump(),  # saved alongside game records
 )
 ```
 
 `game_factory` is a callable that returns a new game instance. This is called for every self-play game and every arena game.
+
+The `arena` parameter accepts either `ArenaConfig` (head-to-head evaluation) or `EloArenaConfig` (Elo pool-based evaluation). See below for details on both.
 
 ## Configuration
 
@@ -58,14 +60,13 @@ training_config = TrainingConfig(
     num_epochs=10,               # epochs per training step
     learning_rate=0.001,
     weight_decay=1e-4,
-    temperature=1.0,             # exploration temperature for self-play
-    temp_threshold=15,           # switch to greedy after this many moves
+    replay_buffer_size=5,        # keep examples from last N iterations
 )
 ```
 
 ### ArenaConfig
 
-Controls model comparison.
+Controls head-to-head model comparison. The new model plays against the previous version and must exceed the win rate threshold to be accepted.
 
 ```python
 from pymcts.core.config import ArenaConfig
@@ -77,22 +78,76 @@ arena_config = ArenaConfig(
 )
 ```
 
+### EloArenaConfig
+
+Controls Elo pool-based evaluation. Instead of head-to-head comparison, the new model plays against a pool of reference players and must achieve a higher Elo rating than the current model.
+
+```python
+from pymcts.core.config import EloArenaConfig
+
+elo_arena = EloArenaConfig(
+    games_per_matchup=40,       # games against each pool player
+    elo_threshold=20.0,         # minimum Elo improvement to accept
+    pool_growth_interval=5,     # add current model to pool every N iterations
+    max_pool_size=None,         # cap on pool size (None = unlimited)
+    swap_players=True,          # play both sides for fairness
+    initial_pool=None,          # paths to seed players (None = start with RandomPlayer)
+)
+```
+
+The pool starts with a `RandomPlayer` (Elo 1000) and grows organically. You can seed it with players from a previous training run:
+
+```python
+elo_arena = EloArenaConfig(
+    initial_pool=[
+        "trainings/run_previous/arena/iteration_010",
+        "trainings/run_previous/arena/iteration_020",
+    ],
+)
+```
+
+!!! tip "When to use EloArenaConfig"
+    Use `EloArenaConfig` when head-to-head comparison is too noisy or when you want
+    to measure improvement against a diverse field rather than just the previous model.
+
 ## Checkpoints
 
 Training saves to `trainings/run_<timestamp>/` by default:
 
 ```
 trainings/run_2026-03-24_143000/
-├── config.json                    # all configs
+├── run_config.json                # all configs (net, mcts, training, arena)
+├── arena/                         # accepted/pool players (loadable with MCTSPlayer.load())
+│   ├── iteration_001/             # accepted player from iteration 1
+│   │   ├── model.pt
+│   │   └── player.json
+│   └── iteration_003/             # iteration 2 was rejected
+│       ├── model.pt
+│       └── player.json
 ├── iteration_001/
 │   ├── pre_training.pt            # weights before training
 │   ├── post_training.pt           # weights after training
 │   ├── self_play_games.json       # games played
 │   ├── eval_games.json            # arena games
+│   ├── arena_results.json         # arena evaluation summary
 │   └── iteration_data.json        # losses, win rates, etc.
 ├── iteration_002/
 │   └── ...
-└── best.pt                        # best model so far
+└── elo_results.json               # Elo ratings (if elo_tracking=True)
+```
+
+When using `EloArenaConfig`, the `arena/` directory also contains pool players:
+
+```
+arena/
+├── random/                        # always present
+│   └── player.json
+├── iteration_001/                 # accepted model
+│   ├── model.pt
+│   └── player.json
+└── pool_iteration_005/            # pool snapshot
+    ├── model.pt
+    └── player.json
 ```
 
 ### Resuming training
@@ -108,7 +163,7 @@ train(
     net=net,
     mcts_config=mcts_config,
     training_config=TrainingConfig(num_iterations=20),  # 20 more
-    arena_config=arena_config,
+    arena=arena_config,
     game_type="mygame",
 )
 ```
@@ -151,8 +206,9 @@ Once you see improvement:
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Training loss doesn't decrease | Learning rate too low, or too few examples | Increase `num_self_play_games` or `learning_rate` |
-| Arena never accepts | Threshold too high, or not enough training | Lower `threshold` to 0.52, increase `num_epochs` |
-| Arena always accepts | Threshold too low | Raise `threshold` to 0.55-0.60 |
+| Arena never accepts (ArenaConfig) | Threshold too high, or not enough training | Lower `threshold` to 0.52, increase `num_epochs` |
+| Arena always accepts (ArenaConfig) | Threshold too low | Raise `threshold` to 0.55-0.60 |
+| Elo never improves (EloArenaConfig) | Threshold too high, or pool too strong | Lower `elo_threshold`, or start with a fresh pool |
 | Training is slow | Too many MCTS simulations | Reduce `num_simulations`, increase `num_parallel_leaves` |
 | Model doesn't improve after many iterations | Network too small, or too few simulations | Increase network size or `num_simulations` |
 

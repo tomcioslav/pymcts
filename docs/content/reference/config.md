@@ -14,6 +14,10 @@ All configuration classes used by the engine.
 
 ::: pymcts.core.config.ArenaConfig
 
+## EloArenaConfig
+
+::: pymcts.core.config.EloArenaConfig
+
 ## PathsConfig
 
 ::: pymcts.core.config.PathsConfig
