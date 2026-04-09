@@ -93,6 +93,73 @@ class BaseNeuralNet(ABC, nn.Module):
             policies, values = self.forward(tensors)
         return policies.cpu(), values.squeeze(-1).cpu()
 
+    def _prepare_dataset(
+        self,
+        examples: list[tuple[GameState, torch.Tensor, float]],
+        batch_size: int,
+    ) -> DataLoader:
+        """Encode examples into tensors and wrap them in a shuffled DataLoader."""
+        states = self.encode_batch([s for s, _, _ in examples])
+        policies = torch.stack([p for _, p, _ in examples])
+        values = torch.tensor([v for _, _, v in examples], dtype=torch.float32).unsqueeze(1)
+        dataset = TensorDataset(states, policies, values)
+        return DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    def _make_optimizer(self, learning_rate: float, weight_decay: float) -> torch.optim.Optimizer:
+        """Create the Adam optimizer for this model's parameters."""
+        return torch.optim.Adam(
+            self.parameters(), lr=learning_rate, weight_decay=weight_decay,
+        )
+
+    def _compute_losses(
+        self,
+        batch_states: torch.Tensor,
+        batch_policies: torch.Tensor,
+        batch_values: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run a forward pass and return (policy_loss, value_loss) for the batch."""
+        log_policy, value = self.forward(batch_states)
+        policy_loss = -torch.sum(batch_policies * log_policy) / batch_states.size(0)
+        value_loss = F.mse_loss(value, batch_values)
+        return policy_loss, value_loss
+
+    def _train_single_epoch(
+        self, loader: DataLoader, optimizer: torch.optim.Optimizer,
+    ) -> tuple[float, float]:
+        """Train for one epoch; return (total_policy_loss, total_value_loss) summed over batches."""
+        device = self.device
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        for batch_states, batch_policies, batch_values in loader:
+            batch_states = batch_states.to(device)
+            batch_policies = batch_policies.to(device)
+            batch_values = batch_values.to(device)
+            policy_loss, value_loss = self._compute_losses(
+                batch_states, batch_policies, batch_values,
+            )
+            optimizer.zero_grad()
+            (policy_loss + value_loss).backward()
+            optimizer.step()
+            total_policy_loss += policy_loss.item()
+            total_value_loss += value_loss.item()
+        return total_policy_loss, total_value_loss
+
+    def _make_epoch_iter(self, num_epochs: int, verbose: bool):
+        """Return an iterable over epoch indices, optionally wrapped with tqdm."""
+        epoch_iter = range(num_epochs)
+        if verbose:
+            return tqdm(epoch_iter, desc="Training", leave=True)
+        return epoch_iter
+
+    def _update_verbose_postfix(self, epoch_iter, avg_pi: float, avg_v: float) -> None:
+        """Update tqdm postfix with current average losses if epoch_iter supports it."""
+        if hasattr(epoch_iter, 'set_postfix'):
+            epoch_iter.set_postfix(
+                pi_loss=f"{avg_pi:.4f}",
+                v_loss=f"{avg_v:.4f}",
+                loss=f"{avg_pi + avg_v:.4f}",
+            )
+
     def train_on_examples(
         self,
         examples: list[tuple[GameState, torch.Tensor, float]],
@@ -106,61 +173,15 @@ class BaseNeuralNet(ABC, nn.Module):
 
         Returns metrics dict with final epoch losses.
         """
-        device = self.device
-        states = self.encode_batch([s for s, _, _ in examples])
-        policies = torch.stack([p for _, p, _ in examples])
-        values = torch.tensor([v for _, _, v in examples], dtype=torch.float32).unsqueeze(1)
-
-        dataset = TensorDataset(states, policies, values)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
-        optimizer = torch.optim.Adam(
-            self.parameters(), lr=learning_rate, weight_decay=weight_decay,
-        )
-
+        loader = self._prepare_dataset(examples, batch_size)
+        optimizer = self._make_optimizer(learning_rate, weight_decay)
+        epoch_iter = self._make_epoch_iter(num_epochs, verbose)
         self.train()
-        total_policy_loss = 0.0
-        total_value_loss = 0.0
-        num_batches = 0
-
-        epoch_iter = range(num_epochs)
-        if verbose:
-            epoch_iter = tqdm(epoch_iter, desc="Training", leave=True)
-
-        for epoch in epoch_iter:
-            total_policy_loss = 0.0
-            total_value_loss = 0.0
-            num_batches = 0
-
-            for batch_states, batch_policies, batch_values in loader:
-                batch_states = batch_states.to(device)
-                batch_policies = batch_policies.to(device)
-                batch_values = batch_values.to(device)
-
-                log_policy, value = self.forward(batch_states)
-                policy_loss = -torch.sum(batch_policies * log_policy) / batch_states.size(0)
-                value_loss = F.mse_loss(value, batch_values)
-                loss = policy_loss + value_loss
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                total_policy_loss += policy_loss.item()
-                total_value_loss += value_loss.item()
-                num_batches += 1
-
-            avg_pi = total_policy_loss / max(num_batches, 1)
-            avg_v = total_value_loss / max(num_batches, 1)
-            if verbose:
-                epoch_iter.set_postfix(
-                    pi_loss=f"{avg_pi:.4f}",
-                    v_loss=f"{avg_v:.4f}",
-                    loss=f"{avg_pi + avg_v:.4f}",
-                )
-
-        return {
-            "policy_loss": avg_pi,
-            "value_loss": avg_v,
-            "loss": avg_pi + avg_v,
-        }
+        avg_pi, avg_v = 0.0, 0.0
+        for _ in epoch_iter:
+            total_pi, total_v = self._train_single_epoch(loader, optimizer)
+            num_batches = max(len(loader), 1)
+            avg_pi = total_pi / num_batches
+            avg_v = total_v / num_batches
+            self._update_verbose_postfix(epoch_iter, avg_pi, avg_v)
+        return {"policy_loss": avg_pi, "value_loss": avg_v, "loss": avg_pi + avg_v}
