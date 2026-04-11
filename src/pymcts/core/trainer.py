@@ -3,12 +3,13 @@
 import json
 import logging
 from collections import deque
-from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from pymcts.core.arena import batched_arena
+from pydantic import BaseModel, ConfigDict, Field
+
+from pymcts.arena.engine import batched_arena
 from pymcts.core.base_game import BaseGame
 from pymcts.core.base_neural_net import BaseNeuralNet
 from pymcts.core.config import ArenaConfig, EloArenaConfig, MCTSConfig, PathsConfig, TrainingConfig
@@ -21,9 +22,10 @@ from pymcts.core.self_play import batched_self_play
 logger = logging.getLogger("pymcts.core.trainer")
 
 
-@dataclass
-class _TrainingContext:
+class _TrainingContext(BaseModel):
     """All shared state for a training run — replaces long parameter lists."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     net: BaseNeuralNet
     mcts_config: MCTSConfig
     training_config: TrainingConfig
@@ -35,13 +37,13 @@ class _TrainingContext:
     run_dir: Path
     arena_dir: Path
     # ArenaConfig state
-    best_checkpoints: deque = field(default_factory=lambda: deque(maxlen=10))
+    best_checkpoints: deque = Field(default_factory=lambda: deque(maxlen=10))
     # EloArenaConfig state
-    pool_players: list[tuple[str, BasePlayer, float]] = field(default_factory=list)
+    pool_players: list[tuple[str, BasePlayer, float]] = []
     pool_current_elo: float | None = None
     # Elo tracking state (optional monitoring)
-    elo_match_results: list[MatchResult] = field(default_factory=list)
-    elo_reference_pool: list = field(default_factory=list)
+    elo_match_results: list[MatchResult] = []
+    elo_reference_pool: list = []
 
 
 def _create_run_dir(paths: PathsConfig) -> Path:

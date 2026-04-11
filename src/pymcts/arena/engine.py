@@ -1,10 +1,10 @@
-"""Arena: run evaluation games between two players."""
+"""Game-playing engine: run batched games between two players."""
 
 import logging
-from dataclasses import dataclass, field
 from typing import Callable
 
 import torch
+from pydantic import BaseModel, ConfigDict
 from tqdm.auto import tqdm
 
 from pymcts.core.base_game import BaseGame
@@ -19,13 +19,14 @@ logger = logging.getLogger("pymcts.core.arena")
 # Shared types
 # ---------------------------------------------------------------------------
 
-@dataclass
-class _GameSlot:
+class _GameSlot(BaseModel):
     """A single concurrent game in the arena."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     game: BaseGame
-    history: list[MoveRecord] = field(default_factory=list)
-    names: list[str] = field(default_factory=list)
-    mcts_for_player: dict[int, MCTS] = field(default_factory=dict)
+    history: list[MoveRecord] = []
+    names: list[str] = []
+    mcts_for_player: dict[int, MCTS] = {}
 
 
 # ---------------------------------------------------------------------------
