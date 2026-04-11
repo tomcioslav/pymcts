@@ -276,6 +276,29 @@ Remove: `ArenaConfig`, `EloArenaConfig` classes
 
 Exports: `Arena`, `SinglePlayerArena`, `MultiPlayerArena`, `EloArena`, `EvaluationResult`, `batched_arena`
 
+## Documentation Updates
+
+The following docs and notebooks reference arena components and need updating:
+
+### docs/content/ (MkDocs site)
+
+- **guide/quickstart.md** — uses `ArenaConfig` and `batched_arena` in code examples. Update to new `SinglePlayerArenaConfig` / `EloArenaConfig` imports and new `train()` signature with `self_play_arena` + `eval_arena` parameters.
+- **guide/training.md** — documents both `ArenaConfig` and `EloArenaConfig` extensively. Rewrite the arena evaluation section to explain the three Arena types and how they're passed to the trainer.
+- **guide/evaluation.md** — documents `batched_arena` function and arena evaluation. Update import paths, add documentation for the Arena abstraction and its three implementations.
+- **reference/config.md** — references configuration classes. Remove `ArenaConfig`/`EloArenaConfig`, add pointer to new arena config classes.
+- **reference/engine.md** — references `batched_arena`. Update import path from `pymcts.core.arena` to `pymcts.arena.engine`. Document the Arena ABC and implementations.
+- **concepts/architecture.md** — system architecture. Update the architecture description to reflect the new `arena/` package as a standalone component.
+
+### Root files
+
+- **README.md** — quick start example uses `ArenaConfig`. Update to new imports and `train()` signature.
+
+### Notebooks
+
+- **notebooks/training.ipynb** — imports `ArenaConfig` from `pymcts.core.config`. Update to new Arena construction and `train()` call.
+- **notebooks/arena.ipynb** — imports `batched_arena` from `pymcts.core.arena`. Update import path.
+- **notebooks/players.ipynb** — imports `batched_arena` from core. Update import path.
+
 ## Migration Notes
 
 - The `batched_arena` function is still available as a public utility from `pymcts.arena.engine` for standalone use outside the training loop.
