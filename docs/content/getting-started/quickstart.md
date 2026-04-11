@@ -8,20 +8,27 @@ Train a neural network to play Bridgit in under 20 lines of code.
 from pymcts.games.bridgit.game import BridgitGame
 from pymcts.games.bridgit.config import BoardConfig, NeuralNetConfig
 from pymcts.games.bridgit.neural_net import BridgitNet
-from pymcts.core.config import MCTSConfig, TrainingConfig, ArenaConfig
+from pymcts.core.config import MCTSConfig, TrainingConfig
+from pymcts.arena import SinglePlayerArena
+from pymcts.arena.config import SinglePlayerArenaConfig
+from pathlib import Path
 from pymcts.core.trainer import train
 
 board_config = BoardConfig(size=5)
 net = BridgitNet(board_config=board_config, net_config=NeuralNetConfig())
 
+game_factory = lambda: BridgitGame(board_config)
+arena_config = SinglePlayerArenaConfig(num_games=10)
+self_play_arena = SinglePlayerArena(arena_config, game_factory, arena_dir=Path("trainings/self_play"))
+eval_arena = SinglePlayerArena(arena_config, game_factory, arena_dir=Path("trainings/eval"))
+
 train(
-    game_factory=lambda: BridgitGame(board_config),
+    game_factory=game_factory,
     net=net,
     mcts_config=MCTSConfig(num_simulations=50),
     training_config=TrainingConfig(num_iterations=3, num_self_play_games=10),
-    arena=ArenaConfig(num_games=10),
-    game_type="bridgit",
-    game_config=board_config.model_dump(),
+    self_play_arena=self_play_arena,
+    eval_arena=eval_arena,
 )
 ```
 
@@ -40,7 +47,7 @@ Checkpoints are saved to `trainings/` automatically.
 After training, pit two models against each other:
 
 ```python
-from pymcts.core.arena import batched_arena
+from pymcts.arena import batched_arena
 from pymcts.core.players import GreedyMCTSPlayer
 from pymcts.core.config import MCTSConfig
 from pymcts.games.bridgit.game import BridgitGame
